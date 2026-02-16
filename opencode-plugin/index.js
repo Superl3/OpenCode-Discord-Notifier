@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 
 const DISCORD_CONTENT_LIMIT = 2000;
 
@@ -154,6 +154,120 @@ function hasUsableDiscordConfig(config) {
   return config.discord.targets.every((target) => !isPlaceholder(target.id));
 }
 
+function normalizeSingleLine(value, maxChars = 120) {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  return truncateText(text, maxChars);
+}
+
+function resolveWorkspaceName(directory, worktree) {
+  const root = resolve(worktree || directory || process.cwd());
+  const name = normalizeSingleLine(basename(root), 80);
+  return name || "OpenCode";
+}
+
+function extractSessionTitle(event) {
+  const props = event?.properties ?? {};
+  const candidates = [
+    props.title,
+    props.sessionTitle,
+    props.session?.title,
+    props.info?.sessionTitle,
+    props.info?.title,
+    props.info?.session?.title,
+    props.part?.sessionTitle,
+    props.part?.title,
+    props.part?.session?.title,
+    props.status?.title,
+    event?.title
+  ];
+
+  for (const value of candidates) {
+    if (typeof value !== "string") {
+      continue;
+    }
+
+    const normalized = normalizeSingleLine(value);
+    if (normalized) {
+      return normalized;
+    }
+  }
+
+  return "";
+}
+
+function classifyTerminationKind(value) {
+  const token = String(value ?? "").toLowerCase();
+  if (!token) {
+    return null;
+  }
+
+  if (/(cancel|cancelled|canceled|abort|aborted|취소)/.test(token)) {
+    return "cancelled";
+  }
+
+  if (/(interrupt|interrupted|stop|stopped|terminate|terminated|killed|halt|중단|멈춤)/.test(token)) {
+    return "interrupted";
+  }
+
+  return null;
+}
+
+function extractTerminationNotice(event) {
+  const props = event?.properties ?? {};
+  const candidates = [
+    props.status?.type,
+    props.status?.reason,
+    props.reason,
+    props.error?.type,
+    props.error?.reason,
+    event?.type
+  ];
+
+  for (const candidate of candidates) {
+    const kind = classifyTerminationKind(candidate);
+    if (!kind) {
+      continue;
+    }
+
+    const detail = normalizeSingleLine(candidate, 60);
+    return {
+      kind,
+      detail
+    };
+  }
+
+  return null;
+}
+
+function buildTerminationBody(notice) {
+  const headline = notice.kind === "cancelled"
+    ? "- 이번 응답은 사용자가 취소했습니다."
+    : "- 이번 응답은 중단되었습니다.";
+
+  if (!notice.detail) {
+    return headline;
+  }
+
+  const normalizedDetail = notice.detail.toLowerCase();
+  if (
+    normalizedDetail === "cancel" ||
+    normalizedDetail === "cancelled" ||
+    normalizedDetail === "canceled" ||
+    normalizedDetail === "abort" ||
+    normalizedDetail === "aborted" ||
+    normalizedDetail === "interrupt" ||
+    normalizedDetail === "interrupted" ||
+    normalizedDetail === "stop" ||
+    normalizedDetail === "stopped" ||
+    normalizedDetail === "terminate" ||
+    normalizedDetail === "terminated"
+  ) {
+    return headline;
+  }
+
+  return `${headline}\n- 상태: ${notice.detail}`;
+}
+
 function buildTextDedupeKey(value) {
   return normalizeText(value).replace(/\s+/g, " ").trim().slice(0, 800);
 }
@@ -248,36 +362,42 @@ async function resolveConfig(directory, worktree) {
   return normalizeRuntimeConfig({});
 }
 
-function buildMessageBody(config, state, triggerKind) {
+function buildMessageBody(config, state, triggerKind, options = {}) {
+  const terminationNotice = options.terminationNotice ?? null;
   const normalized = normalizeText(state.lastAssistantText);
   const missing = "마지막 assistant 메시지를 아직 찾지 못했습니다.";
+  const sessionLabel = state.sessionTitle || state.sessionID;
+  const headerTitle = `${state.workspaceName} - ${sessionLabel}`;
 
-  let body = normalized;
-  if (!body) {
-    body = config.message.mode === "summary" ? `- ${missing}` : `(${missing})`;
+  let body = "";
+  if (terminationNotice) {
+    body = buildTerminationBody(terminationNotice);
+  } else {
+    body = normalized;
+    if (!body) {
+      body = config.message.mode === "summary" ? `- ${missing}` : `(${missing})`;
+    }
+
+    if (config.message.mode === "summary") {
+      body = normalized ? heuristicSummary(normalized, config.message.summaryMaxBullets) : body;
+    }
   }
 
-  if (config.message.mode === "summary") {
-    body = normalized ? heuristicSummary(normalized, config.message.summaryMaxBullets) : body;
-  }
-
-  const sections = [`**${config.message.title}**`];
+  const sections = [`**${headerTitle}**`];
 
   if (config.message.includeMetadata) {
     sections.push(
       [
         `- 시간: ${new Date().toLocaleString("ko-KR", { timeZone: "Asia/Seoul" })}`,
         `- 트리거: ${triggerKind}`,
-        `- 세션: ${state.sessionID}`,
         `- 모드: ${config.message.mode}`
       ].join("\n")
     );
   }
 
-  sections.push(config.message.mode === "summary" ? "**요약된 마지막 메시지**" : "**마지막 메시지**");
   sections.push(body);
 
-  if (config.message.includeRawInCodeBlock && config.message.mode !== "raw") {
+  if (!terminationNotice && config.message.includeRawInCodeBlock && config.message.mode !== "raw") {
     sections.push("**원문**");
     sections.push(`\`\`\`text\n${truncateText(normalized || "(비어 있음)", 700)}\n\`\`\``);
   }
@@ -313,9 +433,11 @@ async function discordRequest(config, path, method, body) {
   return response.json();
 }
 
-function createSessionState(sessionID) {
+function createSessionState(sessionID, workspaceName) {
   return {
     sessionID,
+    workspaceName,
+    sessionTitle: "",
     assistantMessageIds: new Set(),
     textByMessageId: new Map(),
     lastAssistantMessageId: null,
@@ -323,7 +445,8 @@ function createSessionState(sessionID) {
     lastNotifiedMessageId: null,
     lastNotifiedTextKey: "",
     lastNotifiedAt: 0,
-    waitingForInputReady: false
+    waitingForInputReady: false,
+    pendingTerminationNotice: null
   };
 }
 
@@ -346,12 +469,13 @@ function getSessionID(event) {
 
 export default async function OpenCodeNotifierPlugin(input) {
   const config = await resolveConfig(input.directory, input.worktree);
+  const workspaceName = resolveWorkspaceName(input.directory, input.worktree);
   const stateBySession = new Map();
   const dmChannelCache = new Map();
 
   function getState(sessionID) {
     if (!stateBySession.has(sessionID)) {
-      stateBySession.set(sessionID, createSessionState(sessionID));
+      stateBySession.set(sessionID, createSessionState(sessionID, workspaceName));
     }
     return stateBySession.get(sessionID);
   }
@@ -405,7 +529,9 @@ export default async function OpenCodeNotifierPlugin(input) {
       return;
     }
 
-    if (!state.waitingForInputReady) {
+    const terminationNotice = state.pendingTerminationNotice;
+
+    if (!state.waitingForInputReady && !terminationNotice) {
       return;
     }
 
@@ -414,15 +540,22 @@ export default async function OpenCodeNotifierPlugin(input) {
       return;
     }
 
-    if (config.trigger.requireAssistantMessage && !state.lastAssistantMessageId) {
+    if (!terminationNotice && config.trigger.requireAssistantMessage && !state.lastAssistantMessageId) {
       return;
     }
 
-    if (state.lastAssistantMessageId && state.lastAssistantMessageId === state.lastNotifiedMessageId) {
+    if (
+      !terminationNotice &&
+      state.lastAssistantMessageId &&
+      state.lastAssistantMessageId === state.lastNotifiedMessageId
+    ) {
       return;
     }
 
-    const currentTextKey = buildTextDedupeKey(state.lastAssistantText);
+    const currentTextKey = terminationNotice
+      ? `termination:${terminationNotice.kind}:${terminationNotice.detail || ""}`
+      : buildTextDedupeKey(state.lastAssistantText);
+
     if (
       currentTextKey &&
       currentTextKey === state.lastNotifiedTextKey &&
@@ -431,12 +564,13 @@ export default async function OpenCodeNotifierPlugin(input) {
       return;
     }
 
-    const content = buildMessageBody(config, state, triggerKind);
+    const content = buildMessageBody(config, state, triggerKind, { terminationNotice });
     await sendNotification(content);
     state.lastNotifiedAt = Date.now();
     state.lastNotifiedMessageId = state.lastAssistantMessageId;
     state.lastNotifiedTextKey = currentTextKey;
     state.waitingForInputReady = false;
+    state.pendingTerminationNotice = null;
   }
 
   return {
@@ -448,6 +582,11 @@ export default async function OpenCodeNotifierPlugin(input) {
 
       const state = getState(sessionID);
       const props = event.properties ?? {};
+      const sessionTitle = extractSessionTitle(event);
+
+      if (sessionTitle) {
+        state.sessionTitle = sessionTitle;
+      }
 
       if (event.type === "message.updated") {
         const info = props.info;
@@ -455,6 +594,7 @@ export default async function OpenCodeNotifierPlugin(input) {
           state.assistantMessageIds.add(info.id);
           state.lastAssistantMessageId = info.id;
           state.waitingForInputReady = info.id !== state.lastNotifiedMessageId;
+          state.pendingTerminationNotice = null;
 
           const cachedText = state.textByMessageId.get(info.id);
           if (typeof cachedText === "string" && cachedText.trim()) {
@@ -476,14 +616,30 @@ export default async function OpenCodeNotifierPlugin(input) {
         if (state.assistantMessageIds.has(part.messageID) || state.lastAssistantMessageId === part.messageID) {
           state.lastAssistantText = nextText;
           state.waitingForInputReady = part.messageID !== state.lastNotifiedMessageId;
+          state.pendingTerminationNotice = null;
         }
         return;
       }
 
       if (event.type === "session.status") {
         const statusType = props.status?.type;
+
+        const terminationNotice = extractTerminationNotice(event);
+        if (terminationNotice) {
+          state.pendingTerminationNotice = terminationNotice;
+          state.waitingForInputReady = true;
+
+          try {
+            await notifyIfReady(state, `session.status: ${statusType || terminationNotice.kind}`);
+          } catch (error) {
+            process.stderr.write(`[opencode-notifier-plugin] ${error instanceof Error ? error.message : String(error)}\n`);
+          }
+          return;
+        }
+
         if (statusType === "busy" || statusType === "retry") {
           state.waitingForInputReady = state.lastAssistantMessageId !== state.lastNotifiedMessageId;
+          state.pendingTerminationNotice = null;
           return;
         }
 
@@ -493,6 +649,19 @@ export default async function OpenCodeNotifierPlugin(input) {
           } catch (error) {
             process.stderr.write(`[opencode-notifier-plugin] ${error instanceof Error ? error.message : String(error)}\n`);
           }
+        }
+        return;
+      }
+
+      const terminationNotice = extractTerminationNotice(event);
+      if (terminationNotice) {
+        state.pendingTerminationNotice = terminationNotice;
+        state.waitingForInputReady = true;
+
+        try {
+          await notifyIfReady(state, event.type);
+        } catch (error) {
+          process.stderr.write(`[opencode-notifier-plugin] ${error instanceof Error ? error.message : String(error)}\n`);
         }
         return;
       }

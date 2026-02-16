@@ -21,6 +21,8 @@ OpenCode 출력 로그를 감시해서,
 - 메타데이터 포함 여부 (`includeMetadata`)
 - 원문 추가 첨부 (`includeRawInCodeBlock`)
 - 감지 패턴/쿨다운/윈도우 모두 설정 가능
+- 알림 제목을 `작업공간 - 대화 제목` 형태로 자동 구성
+- 취소/중단 이벤트가 발생하면 마지막 메시지 대신 상태 알림 전송
 
 ## 설치
 
@@ -256,9 +258,8 @@ https://discord.com/api/oauth2/authorize?client_id=YOUR_CLIENT_ID&scope=bot&perm
 ## 알림 포맷 예시
 
 ```text
-OpenCode 완료 알림
+OpenCodeNotifier - 결제 오류 원인 분석
 
-요약된 마지막 메시지
 - 핵심 포인트 1 ...
 - 핵심 포인트 2 ...
 - 핵심 포인트 3 ...
@@ -281,6 +282,8 @@ OpenCode 완료 알림
 - "응답 후, 진짜 입력 가능 시점에만 보내고 싶다"면:
   - CLI 래퍼 모드보다 OpenCode IDE 플러그인 모드(`npm run plugin:install`)를 사용하세요.
   - 플러그인 모드는 `session.status: idle` / `session.idle` 이벤트를 직접 받아 트리거합니다.
+- 응답 생성 중 취소/중단했다면:
+  - 마지막 assistant 본문 대신 `이번 응답은 사용자가 취소했습니다.` 또는 `이번 응답은 중단되었습니다.` 형태의 상태 알림이 전송됩니다.
 - "알림이 두 번씩 온다"면:
   - 최신 코드 기준 기본값은 `session.idle`만 사용하므로, 먼저 `npm run setup`으로 설정을 다시 저장하세요.
   - 플러그인 설정에서 `trigger.notifyOnStatusIdle`가 `true`이면 `false`로 바꾸고 IDE를 재시작하세요.
