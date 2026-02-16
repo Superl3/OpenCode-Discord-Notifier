@@ -233,7 +233,7 @@ function heuristicSummary(text, maxBullets) {
   const chunks = cleaned
     .split(/(?<=[.!?])\s+|\n+/g)
     .map((chunk) => chunk.trim())
-    .filter((chunk) => chunk.length >= 16);
+    .filter((chunk) => chunk.length >= 8);
 
   const bullets = [];
   for (const chunk of chunks) {
@@ -242,14 +242,14 @@ function heuristicSummary(text, maxBullets) {
       continue;
     }
 
-    bullets.push(`- ${truncateText(normalized, 220)}`);
+    bullets.push(`- ${truncateText(normalized, 420)}`);
     if (bullets.length >= maxBullets) {
       break;
     }
   }
 
   if (bullets.length === 0) {
-    return `- ${truncateText(cleaned, 280)}`;
+    return `- ${truncateText(cleaned, 820)}`;
   }
 
   return bullets.join("\n");
@@ -465,12 +465,12 @@ function buildRuntimeConfig(config, cliOptions) {
         typeof message.title === "string" && message.title.trim().length > 0
           ? message.title.trim()
           : "OpenCode 완료 알림",
-      includeMetadata: message.includeMetadata !== false,
+      includeMetadata: message.includeMetadata === true,
       includeRawInCodeBlock: message.includeRawInCodeBlock === true,
       maxChars: Number.isFinite(message.maxChars)
         ? Math.min(Math.max(300, message.maxChars), DISCORD_CONTENT_LIMIT)
         : 1900,
-      summaryMaxBullets: Number.isFinite(message.summaryMaxBullets) ? message.summaryMaxBullets : 4
+      summaryMaxBullets: Number.isFinite(message.summaryMaxBullets) ? message.summaryMaxBullets : 8
     },
     discord: {
       botToken: discord.botToken ?? "",

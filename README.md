@@ -25,7 +25,32 @@ OpenCode 출력 로그를 감시해서,
 ## 설치
 
 ```bash
+git clone https://github.com/Superl3/OpenCode-Discord-Notifier.git
+cd OpenCode-Discord-Notifier
 npm install
+npm run setup
+```
+
+이미 저장소에 들어와 있다면 아래처럼 바로 설정만 실행해도 됩니다.
+
+```bash
+npm install
+npm run setup
+```
+
+`npm install`을 처음 실행할 때도 postinstall 훅이 초기 설정 여부를 물어보도록 되어 있습니다.
+건너뛰었거나 나중에 다시 설정하려면 `npm run setup`을 실행하면 됩니다.
+
+`npm run setup`은 인터랙티브 모드로 아래를 순서대로 물어봅니다.
+
+- 디스코드 봇 토큰
+- 채널 ID 또는 DM 유저 ID
+- (선택) 멘션 유저 ID
+- 플러그인 모드/CLI 모드 선택
+
+직접 파일을 편집하고 싶으면 기존 방식도 가능합니다.
+
+```bash
 cp opencode-notifier.config.example.json opencode-notifier.config.json
 ```
 
@@ -179,6 +204,10 @@ npm run plugin:uninstall
   - 같은 세션에서 중복 알림 방지 간격
 - `message.mode`
   - `raw | cleaned | summary`
+- `message.includeMetadata`
+  - 메타데이터(시간/트리거/세션)를 본문에 포함할지 여부 (기본값 `false`)
+- `message.summaryMaxBullets`
+  - `summary` 모드에서 표시할 요약 bullet 개수 (기본값 `8`)
 - `openCode.commandCandidates`
   - `openCode.command` 실패 시 순차적으로 시도할 실행 명령 목록
 - `openCode.useShell`
@@ -193,9 +222,11 @@ npm run plugin:uninstall
 ### 플러그인 전용 핵심 설정
 
 - `trigger.notifyOnStatusIdle`
-  - `session.status: idle` 이벤트에서 알림
+  - `session.status: idle` 이벤트에서 알림 (기본값 `false`, 필요 시만 켜기)
 - `trigger.notifyOnSessionIdle`
-  - `session.idle` 이벤트에서 알림
+  - `session.idle` 이벤트에서 알림 (기본값 `true`)
+- `trigger.dedupeWindowMs`
+  - 같은 메시지가 연속 idle 이벤트에서 중복 발송되는 것을 막는 보호 시간(ms)
 - `trigger.requireAssistantMessage`
   - assistant 메시지가 없는 idle 이벤트는 무시
 
@@ -226,14 +257,12 @@ https://discord.com/api/oauth2/authorize?client_id=YOUR_CLIENT_ID&scope=bot&perm
 
 ```text
 OpenCode 완료 알림
-- 시간: 2026. 2. 14. 오후 5:00:00
-- 트리거: 빌드 완료 -> 입력 대기
-- 모드: summary
-- 실행 명령: opencode
 
 요약된 마지막 메시지
 - 핵심 포인트 1 ...
 - 핵심 포인트 2 ...
+- 핵심 포인트 3 ...
+- 핵심 포인트 4 ...
 ```
 
 ## 트러블슈팅
@@ -252,6 +281,12 @@ OpenCode 완료 알림
 - "응답 후, 진짜 입력 가능 시점에만 보내고 싶다"면:
   - CLI 래퍼 모드보다 OpenCode IDE 플러그인 모드(`npm run plugin:install`)를 사용하세요.
   - 플러그인 모드는 `session.status: idle` / `session.idle` 이벤트를 직접 받아 트리거합니다.
+- "알림이 두 번씩 온다"면:
+  - 최신 코드 기준 기본값은 `session.idle`만 사용하므로, 먼저 `npm run setup`으로 설정을 다시 저장하세요.
+  - 플러그인 설정에서 `trigger.notifyOnStatusIdle`가 `true`이면 `false`로 바꾸고 IDE를 재시작하세요.
+  - 그래도 중복이면 `trigger.dedupeWindowMs`를 `15000` 이상으로 올려서 동일 메시지 중복을 차단하세요.
+- 메타데이터 줄(시간/트리거/세션)이 불필요하면:
+  - `message.includeMetadata`를 `false`로 설정하세요. (`npm run setup` 기본값도 `false`)
 - `Discord API ... failed (403): Missing Access`가 나오면:
   - 봇이 해당 서버에 초대되지 않았거나
   - 채널 ID가 해당 서버/채널이 아닐 수 있고

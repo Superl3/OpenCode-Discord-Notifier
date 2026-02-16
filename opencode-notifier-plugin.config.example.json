@@ -2,17 +2,18 @@
   "enabled": true,
   "trigger": {
     "notifyOnSessionIdle": true,
-    "notifyOnStatusIdle": true,
+    "notifyOnStatusIdle": false,
     "cooldownMs": 60000,
+    "dedupeWindowMs": 15000,
     "requireAssistantMessage": true
   },
   "message": {
     "mode": "summary",
     "title": "OpenCode 입력 가능 알림",
-    "includeMetadata": true,
+    "includeMetadata": false,
     "includeRawInCodeBlock": false,
     "maxChars": 1900,
-    "summaryMaxBullets": 4
+    "summaryMaxBullets": 8
   },
   "discord": {
     "botToken": "DISCORD_BOT_TOKEN",

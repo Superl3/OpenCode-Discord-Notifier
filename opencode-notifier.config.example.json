@@ -45,10 +45,10 @@
   "message": {
     "mode": "summary",
     "title": "OpenCode 완료 알림",
-    "includeMetadata": true,
+    "includeMetadata": false,
     "includeRawInCodeBlock": false,
     "maxChars": 1900,
-    "summaryMaxBullets": 4
+    "summaryMaxBullets": 8
   },
   "discord": {
     "botToken": "DISCORD_BOT_TOKEN",

@@ -38,7 +38,7 @@ function heuristicSummary(text, maxBullets) {
   const chunks = cleaned
     .split(/(?<=[.!?])\s+|\n+/g)
     .map((chunk) => chunk.trim())
-    .filter((chunk) => chunk.length >= 16);
+    .filter((chunk) => chunk.length >= 8);
 
   const bullets = [];
   for (const chunk of chunks) {
@@ -47,14 +47,14 @@ function heuristicSummary(text, maxBullets) {
       continue;
     }
 
-    bullets.push(`- ${truncateText(normalized, 220)}`);
+    bullets.push(`- ${truncateText(normalized, 420)}`);
     if (bullets.length >= maxBullets) {
       break;
     }
   }
 
   if (bullets.length === 0) {
-    return `- ${truncateText(cleaned, 280)}`;
+    return `- ${truncateText(cleaned, 820)}`;
   }
 
   return bullets.join("\n");
@@ -78,17 +78,18 @@ function buildDefaultConfig() {
     enabled: true,
     trigger: {
       notifyOnSessionIdle: true,
-      notifyOnStatusIdle: true,
+      notifyOnStatusIdle: false,
       cooldownMs: 60000,
+      dedupeWindowMs: 15000,
       requireAssistantMessage: true
     },
     message: {
       mode: "summary",
       title: "OpenCode 입력 가능 알림",
-      includeMetadata: true,
+      includeMetadata: false,
       includeRawInCodeBlock: false,
       maxChars: 1900,
-      summaryMaxBullets: 4
+      summaryMaxBullets: 8
     },
     discord: {
       botToken: "",
@@ -153,6 +154,10 @@ function hasUsableDiscordConfig(config) {
   return config.discord.targets.every((target) => !isPlaceholder(target.id));
 }
 
+function buildTextDedupeKey(value) {
+  return normalizeText(value).replace(/\s+/g, " ").trim().slice(0, 800);
+}
+
 function normalizeRuntimeConfig(raw) {
   const merged = mergeConfig(buildDefaultConfig(), raw);
   const messageMode = ["raw", "cleaned", "summary"].includes(merged.message?.mode)
@@ -163,8 +168,11 @@ function normalizeRuntimeConfig(raw) {
     enabled: merged.enabled !== false,
     trigger: {
       notifyOnSessionIdle: merged.trigger?.notifyOnSessionIdle !== false,
-      notifyOnStatusIdle: merged.trigger?.notifyOnStatusIdle !== false,
+      notifyOnStatusIdle: merged.trigger?.notifyOnStatusIdle === true,
       cooldownMs: Number.isFinite(merged.trigger?.cooldownMs) ? merged.trigger.cooldownMs : 60000,
+      dedupeWindowMs: Number.isFinite(merged.trigger?.dedupeWindowMs)
+        ? Math.min(Math.max(1000, merged.trigger.dedupeWindowMs), 300000)
+        : 15000,
       requireAssistantMessage: merged.trigger?.requireAssistantMessage !== false
     },
     message: {
@@ -172,14 +180,14 @@ function normalizeRuntimeConfig(raw) {
       title: typeof merged.message?.title === "string" && merged.message.title.trim()
         ? merged.message.title.trim()
         : "OpenCode 입력 가능 알림",
-      includeMetadata: merged.message?.includeMetadata !== false,
+      includeMetadata: merged.message?.includeMetadata === true,
       includeRawInCodeBlock: merged.message?.includeRawInCodeBlock === true,
       maxChars: Number.isFinite(merged.message?.maxChars)
         ? Math.min(Math.max(300, merged.message.maxChars), DISCORD_CONTENT_LIMIT)
         : 1900,
       summaryMaxBullets: Number.isFinite(merged.message?.summaryMaxBullets)
         ? merged.message.summaryMaxBullets
-        : 4
+        : 8
     },
     discord: {
       botToken: typeof merged.discord?.botToken === "string" ? merged.discord.botToken : "",
@@ -227,8 +235,9 @@ async function resolveConfig(directory, worktree) {
       discord: loaded.discord,
       trigger: {
         notifyOnSessionIdle: true,
-        notifyOnStatusIdle: true,
+        notifyOnStatusIdle: false,
         cooldownMs: loaded.detection?.cooldownMs,
+        dedupeWindowMs: 15000,
         requireAssistantMessage: true
       }
     };
@@ -312,6 +321,7 @@ function createSessionState(sessionID) {
     lastAssistantMessageId: null,
     lastAssistantText: "",
     lastNotifiedMessageId: null,
+    lastNotifiedTextKey: "",
     lastNotifiedAt: 0,
     waitingForInputReady: false
   };
@@ -412,10 +422,20 @@ export default async function OpenCodeNotifierPlugin(input) {
       return;
     }
 
+    const currentTextKey = buildTextDedupeKey(state.lastAssistantText);
+    if (
+      currentTextKey &&
+      currentTextKey === state.lastNotifiedTextKey &&
+      now - state.lastNotifiedAt < config.trigger.dedupeWindowMs
+    ) {
+      return;
+    }
+
     const content = buildMessageBody(config, state, triggerKind);
     await sendNotification(content);
     state.lastNotifiedAt = Date.now();
     state.lastNotifiedMessageId = state.lastAssistantMessageId;
+    state.lastNotifiedTextKey = currentTextKey;
     state.waitingForInputReady = false;
   }
 
@@ -434,7 +454,7 @@ export default async function OpenCodeNotifierPlugin(input) {
         if (info?.role === "assistant" && typeof info.id === "string") {
           state.assistantMessageIds.add(info.id);
           state.lastAssistantMessageId = info.id;
-          state.waitingForInputReady = true;
+          state.waitingForInputReady = info.id !== state.lastNotifiedMessageId;
 
           const cachedText = state.textByMessageId.get(info.id);
           if (typeof cachedText === "string" && cachedText.trim()) {
@@ -455,7 +475,7 @@ export default async function OpenCodeNotifierPlugin(input) {
 
         if (state.assistantMessageIds.has(part.messageID) || state.lastAssistantMessageId === part.messageID) {
           state.lastAssistantText = nextText;
-          state.waitingForInputReady = true;
+          state.waitingForInputReady = part.messageID !== state.lastNotifiedMessageId;
         }
         return;
       }
@@ -463,7 +483,7 @@ export default async function OpenCodeNotifierPlugin(input) {
       if (event.type === "session.status") {
         const statusType = props.status?.type;
         if (statusType === "busy" || statusType === "retry") {
-          state.waitingForInputReady = true;
+          state.waitingForInputReady = state.lastAssistantMessageId !== state.lastNotifiedMessageId;
           return;
         }
 
