@@ -1,0 +1,259 @@
+# OpenCode 알림 전송기
+
+OpenCode 출력 로그를 감시해서,
+
+1. 빌드/작업 완료 신호가 나오고
+2. 이어서 사용자 입력 대기 신호가 나오면
+
+디스코드 봇으로 알림을 보내는 래퍼입니다.
+
+브라우저 UI도 함께 제공해서, 설정 파일을 손으로 편집하지 않고
+로드/수정/저장/드라이런 테스트를 한 번에 처리할 수 있습니다.
+
+## 지원 기능
+
+- 특정 유저 DM 전송 (`targets[].type = "user"`)
+- 특정 채널 전송 (`targets[].type = "channel"`)
+- 마지막 메시지 전달 모드
+  - `raw`: 원문 최대한 유지
+  - `cleaned`: ANSI/잡음 정리
+  - `summary`: 휴리스틱 요약
+- 메타데이터 포함 여부 (`includeMetadata`)
+- 원문 추가 첨부 (`includeRawInCodeBlock`)
+- 감지 패턴/쿨다운/윈도우 모두 설정 가능
+
+## 설치
+
+```bash
+npm install
+cp opencode-notifier.config.example.json opencode-notifier.config.json
+```
+
+`opencode-notifier.config.json`에서 디스코드 토큰/ID와 패턴을 수정하세요.
+
+기본 파일(`opencode-notifier.config.json`)은 채널 전송 프리셋으로 준비되어 있습니다.
+실제로는 아래 2개만 바꾸면 바로 동작합니다.
+
+- `discord.botToken`
+- `discord.targets[0].id` (내 Discord 채널 ID)
+
+## 핵심 개념 정리
+
+### 1) `discord.botToken`은 무엇인가요?
+
+- `discord.botToken`은 Discord 개발자 포털의 **Bot** 페이지에서 발급받는 봇 토큰입니다.
+- OAuth `Client Secret`과는 다릅니다. `Client Secret`은 사용하면 안 됩니다.
+
+### 2) `openCode.args`는 무엇인가요?
+
+- `openCode.args`는 `openCode.command` 뒤에 붙는 추가 인자 목록입니다.
+- UI의 `OpenCode 인수` 칸은 한 줄에 하나씩 입력하며, JSON에서는 배열로 저장됩니다.
+
+### 2-1) `openCode.commandCandidates`는 무엇인가요?
+
+- `openCode.command`가 현재 데스크탑에서 실행되지 않으면, 후보 명령을 순서대로 자동 시도합니다.
+- Windows 환경에서 `opencode`가 없고 `oh-my-opencode`만 설치된 경우를 자동으로 흡수합니다.
+- 기본 후보: `opencode`, `oh-my-opencode`, `opencode-cli`
+
+예시
+
+```json
+"openCode": {
+  "command": "opencode",
+  "args": ["--model", "opus", "--max-turns", "20"]
+}
+```
+
+UI 입력 형태
+
+```text
+--model
+opus
+--max-turns
+20
+```
+
+### 3) 사용자 ID/채널 ID 사용
+
+- `type: "channel"`는 지정 채널로만 알림을 보냅니다.
+- `type: "user"`는 DM 대상 유저로 보냅니다.
+- 채널 전용이면 유저 타겟은 비워 두어도 됩니다.
+
+## UI로 설정하기 (권장)
+
+```bash
+npm run ui
+```
+
+브라우저에서 `http://127.0.0.1:4780`을 열면 설정 화면이 나옵니다.
+
+### UI 사용 순서
+
+1. `설정 불러오기`로 기존 설정 또는 예시 템플릿 로드
+2. `빠른 설정`에서 토큰/대상ID/실행 명령(필요 시 명령 후보)/모드/패턴 입력
+3. `폼 반영`으로 반영 후 필요하면 `원본 JSON 편집기`에서 세부 조정
+4. `저장`으로 파일 저장
+5. `포맷 테스트`로 감지 및 알림 포맷 확인
+6. `실행 명령 복사`로 실제 실행 명령 복사
+
+UI 하단에는 `알림 실행` 명령과 `포맷 테스트 결과`가 바로 표시됩니다.
+
+## 실행
+
+### 1) 설정 파일에 있는 명령으로 실행
+
+```bash
+npm run start -- --config ./opencode-notifier.config.json
+```
+
+### 2) 명령 오버라이드로 실행
+
+```bash
+npm run start -- --config ./opencode-notifier.config.json -- opencode
+```
+
+### 2-1) 프로필 지정 실행 (다른 데스크탑 재사용)
+
+```bash
+npm run start -- --config ./opencode-notifier.config.json --profile desktop-main
+```
+
+`profiles.desktop-main` 같은 블록을 두고 PC별로 `openCode.command`, `cwd`, `discord.targets`를 분리하면
+동일 저장소를 여러 데스크탑에 그대로 복제해도 빠르게 적용할 수 있습니다.
+
+### 3) Discord API 없이 payload 확인
+
+```bash
+npm run start -- --dry-run --config ./opencode-notifier.config.json -- opencode
+```
+
+## OpenCode IDE 플러그인 모드 (권장)
+
+CLI 래퍼 대신 OpenCode 플러그인으로 붙이면, 사용자가 원하는 3가지가 더 정확하게 동작합니다.
+
+- assistant 응답이 끝난 뒤 내용을 기준으로 알림 생성
+- 실제 입력 가능 상태(`session.status: idle`, `session.idle`) 시점에 알림 전송
+- OpenCode 플러그인 목록(`opencode.json`의 `plugin` 배열)에서 항목으로 로드
+
+### 설치
+
+```bash
+npm run plugin:install
+```
+
+설치 스크립트는 아래를 자동으로 처리합니다.
+
+- `~/.config/opencode/opencode.json`의 `plugin` 배열에 `opencode-notifier-plugin` 추가
+- `~/.config/opencode/package.json`에 로컬 플러그인 dependency 추가
+- `npm install --prefix ~/.config/opencode` 실행
+
+적용 후 OpenCode IDE를 재시작하세요.
+
+### 플러그인 설정 파일
+
+플러그인은 아래 순서로 설정을 찾습니다.
+
+1. `<worktree>/.opencode/opencode-notifier-plugin.json`
+2. `~/.config/opencode/opencode-notifier-plugin.json`
+3. (없으면) `<worktree>/opencode-notifier.config.json`의 `message/discord`를 자동 브리지
+
+예시 파일: `opencode-notifier-plugin.config.example.json`
+
+### 제거
+
+```bash
+npm run plugin:uninstall
+```
+
+## 핵심 설정
+
+`opencode-notifier.config.json`:
+
+- `detection.buildCompletePatterns`
+  - 빌드/작업 완료를 의미하는 문자열 또는 정규식 리터럴 문자열 (`"/pattern/i"`)
+- `detection.waitingInputPatterns`
+  - 입력 대기 상태를 의미하는 문자열/정규식
+- `detection.readyWindowMs`
+  - 완료 신호 이후 대기 신호가 이 시간 안에 나오면 알림 발송
+- `detection.cooldownMs`
+  - 같은 세션에서 중복 알림 방지 간격
+- `message.mode`
+  - `raw | cleaned | summary`
+- `openCode.commandCandidates`
+  - `openCode.command` 실패 시 순차적으로 시도할 실행 명령 목록
+- `openCode.useShell`
+  - Windows에서 `.cmd/.bat` 래퍼를 확실히 실행하고 싶을 때 `true` 권장
+- `parser.assistantBlockStartPatterns / assistantBlockEndPatterns`
+  - OpenCode 로그 형식이 명확할 때 마지막 assistant 블록 추출 정확도를 높임
+- `discord.targets`
+  - 여러 타겟 동시 전송 가능
+- `profiles`
+  - 데스크탑/환경별 오버라이드 묶음. `--profile <name>`으로 선택
+
+### 플러그인 전용 핵심 설정
+
+- `trigger.notifyOnStatusIdle`
+  - `session.status: idle` 이벤트에서 알림
+- `trigger.notifyOnSessionIdle`
+  - `session.idle` 이벤트에서 알림
+- `trigger.requireAssistantMessage`
+  - assistant 메시지가 없는 idle 이벤트는 무시
+
+## 디스코드 봇 권한/초대 설정
+
+### 최소 권한
+
+- `View Channels`
+- `Send Messages`
+
+### 권한 URL (예시)
+
+`YOUR_CLIENT_ID`를 바꿔 사용하세요.
+
+```text
+https://discord.com/api/oauth2/authorize?client_id=YOUR_CLIENT_ID&scope=bot&permissions=3072
+```
+
+`3072`는 `View Channels(1024)` + `Send Messages(2048)` 조합입니다.
+
+### 전송 조건
+
+- 채널 전송: 봇이 해당 서버/채널에 초대되어 있고 메시지 권한이 있어야 합니다.
+- DM 전송: 봇이 대상 유저와 DM을 열 수 있어야 합니다.
+- 채널 ID만 넣고 DM을 비워 둬도 정상 동작합니다.
+
+## 알림 포맷 예시
+
+```text
+OpenCode 완료 알림
+- 시간: 2026. 2. 14. 오후 5:00:00
+- 트리거: 빌드 완료 -> 입력 대기
+- 모드: summary
+- 실행 명령: opencode
+
+요약된 마지막 메시지
+- 핵심 포인트 1 ...
+- 핵심 포인트 2 ...
+```
+
+## 트러블슈팅
+
+- 알림이 안 오면 먼저 `--dry-run`으로 감지 자체가 되는지 확인하세요.
+- 감지는 되는데 디스코드 전송만 실패하면 토큰/권한/ID를 확인하세요.
+- 감지 정확도가 낮으면 `detection.*Patterns`와 `parser.*Patterns`를 현재 로그 형식에 맞게 조정하세요.
+- `[notifier:error] openCode command를 실행할 수 없습니다...`(ENOENT) 오류가 나오면:
+  - 원인: `openCode.command`가 현재 데스크탑 PATH에 없거나 오타입니다.
+  - 먼저 `where opencode`, `where oh-my-opencode`로 실제 실행 가능 명령을 확인하세요.
+  - `openCode.commandCandidates`에 실제 명령을 추가하면 데스크탑마다 자동으로 맞춰집니다.
+  - 그래도 실패하면 `openCode.command`를 절대 경로(`C:\Path\To\opencode.exe`)로 지정하세요.
+- "테스트 메시지는 되는데 실제 실행은 실패"라면:
+  - 테스트는 `node -e ...` 같은 오버라이드 명령으로 성공했을 가능성이 큽니다.
+  - 실제 운용은 config의 `openCode.command`를 쓰므로, 두 명령이 다르면 결과가 달라질 수 있습니다.
+- "응답 후, 진짜 입력 가능 시점에만 보내고 싶다"면:
+  - CLI 래퍼 모드보다 OpenCode IDE 플러그인 모드(`npm run plugin:install`)를 사용하세요.
+  - 플러그인 모드는 `session.status: idle` / `session.idle` 이벤트를 직접 받아 트리거합니다.
+- `Discord API ... failed (403): Missing Access`가 나오면:
+  - 봇이 해당 서버에 초대되지 않았거나
+  - 채널 ID가 해당 서버/채널이 아닐 수 있고
+  - 채널 권한(`Send Messages`, `View Channel`)이 부족합니다.
+  - 봇 초대 링크를 다시 만들고, 채널을 다시 한 번 확인하세요.

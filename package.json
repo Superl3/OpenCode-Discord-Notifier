@@ -1,0 +1,13 @@
+{
+  "name": "opencode-notifier",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/opencode-notifier.js",
+    "ui": "node src/ui-server.js",
+    "check": "node --check src/opencode-notifier.js && node --check src/ui-server.js",
+    "plugin:install": "node scripts/install-opencode-plugin.js",
+    "plugin:uninstall": "node scripts/uninstall-opencode-plugin.js"
+  }
+}

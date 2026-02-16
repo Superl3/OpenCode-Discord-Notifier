@@ -1,0 +1,28 @@
+{
+  "enabled": true,
+  "trigger": {
+    "notifyOnSessionIdle": true,
+    "notifyOnStatusIdle": true,
+    "cooldownMs": 60000,
+    "requireAssistantMessage": true
+  },
+  "message": {
+    "mode": "summary",
+    "title": "OpenCode 입력 가능 알림",
+    "includeMetadata": true,
+    "includeRawInCodeBlock": false,
+    "maxChars": 1900,
+    "summaryMaxBullets": 4
+  },
+  "discord": {
+    "botToken": "DISCORD_BOT_TOKEN",
+    "targets": [
+      {
+        "type": "channel",
+        "id": "YOUR_CHANNEL_ID"
+      }
+    ],
+    "mentionUserId": null,
+    "timeoutMs": 10000
+  }
+}

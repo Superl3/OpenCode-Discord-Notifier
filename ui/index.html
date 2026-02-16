@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OpenCode 알림 설정</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="bg-layer"></div>
+    <main class="page">
+      <header class="hero">
+        <p class="eyebrow">OpenCode 작업 패널</p>
+        <h1>Discord 알림 설정 화면</h1>
+        <p class="lead">
+          설정 로드/저장, 드라이런 검증, 실행 명령 복사까지 한 화면에서 처리합니다.
+        </p>
+      </header>
+
+      <section class="actions card">
+        <div class="field short">
+          <label for="configPath">설정 파일 경로</label>
+          <input id="configPath" type="text" value="opencode-notifier.config.json" />
+        </div>
+
+        <div class="button-row">
+          <button id="loadConfigBtn" class="btn neutral">설정 불러오기</button>
+          <button id="formToJsonBtn" class="btn neutral">폼 반영</button>
+          <button id="jsonToFormBtn" class="btn neutral">JSON 반영</button>
+          <button id="formatJsonBtn" class="btn neutral">JSON 정렬</button>
+          <button id="saveConfigBtn" class="btn primary">저장</button>
+          <button id="dryRunBtn" class="btn accent">포맷 테스트</button>
+          <button id="copyCommandBtn" class="btn neutral">실행 명령 복사</button>
+        </div>
+      </section>
+
+      <section class="grid">
+        <article class="card config-card">
+          <h2>빠른 설정</h2>
+          <div class="form-grid">
+            <div class="field">
+               <label for="botToken">디스코드 봇 토큰</label>
+              <input id="botToken" type="password" autocomplete="off" />
+            </div>
+
+            <div class="field">
+                <label for="mentionUserId">멘션할 유저 ID (선택)</label>
+              <input id="mentionUserId" type="text" />
+            </div>
+
+            <div class="field full">
+              <label for="openCodeCommand">OpenCode 실행 명령</label>
+              <input id="openCodeCommand" type="text" placeholder="opencode" />
+            </div>
+
+            <div class="field full">
+              <label for="openCodeCommandCandidates">실행 명령 후보 (한 줄에 하나)</label>
+              <textarea id="openCodeCommandCandidates" rows="3" placeholder="oh-my-opencode&#10;opencode-cli"></textarea>
+            </div>
+
+            <div class="field full">
+                <label for="openCodeArgs">OpenCode 인수 (한 줄에 하나)</label>
+              <textarea id="openCodeArgs" rows="4"></textarea>
+            </div>
+
+            <div class="field check-group">
+              <label><input id="openCodeUseShell" type="checkbox" /> Windows .cmd/.bat 실행 호환 모드 사용</label>
+            </div>
+
+            <div class="field">
+                <label for="messageMode">메시지 모드</label>
+              <select id="messageMode">
+                <option value="summary">summary</option>
+                <option value="cleaned">cleaned</option>
+                <option value="raw">raw</option>
+              </select>
+            </div>
+
+            <div class="field check-group">
+                <label><input id="includeMetadata" type="checkbox" checked /> 메타데이터 포함</label>
+                <label><input id="includeRawInCodeBlock" type="checkbox" /> 원문 tail 추가</label>
+            </div>
+
+              <div class="field">
+                <label for="userTargets">DM 대상 유저 ID (한 줄에 하나, 선택)</label>
+                <textarea id="userTargets" rows="4"></textarea>
+              </div>
+
+              <div class="field">
+                <label for="channelTargets">채널 ID (한 줄에 하나)</label>
+                <textarea id="channelTargets" rows="4"></textarea>
+              </div>
+
+              <div class="field">
+                <label for="buildPatterns">빌드 완료 감지 패턴</label>
+                <textarea id="buildPatterns" rows="5"></textarea>
+              </div>
+
+              <div class="field">
+                <label for="waitPatterns">입력 대기 감지 패턴</label>
+                <textarea id="waitPatterns" rows="5"></textarea>
+              </div>
+
+              <div class="field">
+                <label for="assistantStartPatterns">assistant 블록 시작 패턴</label>
+                <textarea id="assistantStartPatterns" rows="4"></textarea>
+              </div>
+
+              <div class="field">
+                <label for="assistantEndPatterns">assistant 블록 종료 패턴</label>
+                <textarea id="assistantEndPatterns" rows="4"></textarea>
+              </div>
+          </div>
+        </article>
+
+        <article class="card editor-card">
+          <h2>원본 JSON 편집기</h2>
+            <textarea id="rawJson" class="json-editor" spellcheck="false"></textarea>
+          </article>
+      </section>
+
+        <section class="card command-card">
+          <h2>실행 명령</h2>
+        <p class="command-label">실행 명령</p>
+        <code id="runCommand"></code>
+        <p class="command-label">UI 실행</p>
+        <code>npm run ui</code>
+      </section>
+
+        <section class="card output-card">
+          <h2>포맷 테스트 결과</h2>
+            <pre id="dryRunOutput">아직 실행 기록이 없습니다.</pre>
+          </section>
+
+        <footer id="statusBar" class="status">준비됨.</footer>
+    </main>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

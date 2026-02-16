@@ -1,0 +1,9 @@
+node_modules/
+npm-debug.log*
+
+# Local secrets / runtime config
+opencode-notifier.config.json
+opencode-notifier-plugin.config.json
+
+# OpenCode local workspace plugin config
+.opencode/

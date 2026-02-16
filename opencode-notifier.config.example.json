@@ -1,0 +1,77 @@
+{
+  "openCode": {
+    "command": "opencode",
+    "commandCandidates": [
+      "oh-my-opencode",
+      "opencode-cli"
+    ],
+    "args": [],
+    "useShell": false,
+    "cwd": ".",
+    "env": {}
+  },
+  "detection": {
+    "buildCompletePatterns": [
+      "build complete",
+      "build completed",
+      "completed successfully",
+      "all checks passed"
+    ],
+    "waitingInputPatterns": [
+      "waiting for input",
+      "ready for input",
+      "type your message"
+    ],
+    "readyWindowMs": 120000,
+    "cooldownMs": 90000
+  },
+  "parser": {
+    "assistantBlockStartPatterns": [
+      "/^assistant\\s*:/i",
+      "/^\\[assistant\\]/i"
+    ],
+    "assistantBlockEndPatterns": [
+      "/^user\\s*:/i",
+      "/^\\[user\\]/i",
+      "/waiting for input/i"
+    ],
+    "noisePatterns": [
+      "/^debug:/i",
+      "/^trace:/i"
+    ],
+    "tailLines": 24,
+    "maxBufferLines": 800
+  },
+  "message": {
+    "mode": "summary",
+    "title": "OpenCode 완료 알림",
+    "includeMetadata": true,
+    "includeRawInCodeBlock": false,
+    "maxChars": 1900,
+    "summaryMaxBullets": 4
+  },
+  "discord": {
+    "botToken": "DISCORD_BOT_TOKEN",
+    "targets": [
+      {
+        "type": "channel",
+        "id": "YOUR_CHANNEL_ID"
+      }
+    ],
+    "mentionUserId": null,
+    "timeoutMs": 10000
+  },
+  "profiles": {
+    "desktop-main": {
+      "openCode": {
+        "command": "oh-my-opencode"
+      }
+    },
+    "desktop-secondary": {
+      "openCode": {
+        "command": "opencode",
+        "cwd": "."
+      }
+    }
+  }
+}
