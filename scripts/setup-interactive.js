@@ -11,6 +11,41 @@ function isPlainObject(value) {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
+function normalizeSingleLine(value, maxChars = 80) {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  if (!text) {
+    return "";
+  }
+
+  if (text.length <= maxChars) {
+    return text;
+  }
+
+  return text.slice(0, Math.max(1, maxChars)).trim();
+}
+
+function normalizeEnvironmentLabel(value) {
+  return normalizeSingleLine(value, 60);
+}
+
+function resolveRuntimeEnvironmentKey() {
+  const explicit = normalizeSingleLine(process.env.OPENCODE_ENV_KEY, 120);
+  if (explicit) {
+    return explicit;
+  }
+
+  const host = normalizeSingleLine(
+    process.env.OPENCODE_ENV_HOST || process.env.COMPUTERNAME || process.env.HOSTNAME || "unknown-host",
+    60
+  ).toLowerCase();
+  const user = normalizeSingleLine(
+    process.env.OPENCODE_ENV_USER || process.env.USERNAME || process.env.USER || "unknown-user",
+    60
+  ).toLowerCase();
+
+  return `${process.platform}:${host}:${user}`;
+}
+
 async function readJsonTemplate(filePath) {
   const raw = await readFile(filePath, "utf8");
   const parsed = JSON.parse(raw);
@@ -22,6 +57,16 @@ async function readJsonTemplate(filePath) {
   return parsed;
 }
 
+async function readJsonIfExists(filePath) {
+  try {
+    const raw = await readFile(filePath, "utf8");
+    const parsed = JSON.parse(raw);
+    return isPlainObject(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 async function writeJson(filePath, data) {
   await mkdir(dirname(filePath), { recursive: true });
   await writeFile(filePath, `${JSON.stringify(data, null, 2)}\n`, "utf8");
@@ -29,6 +74,36 @@ async function writeJson(filePath, data) {
 
 function cloneObject(value) {
   return JSON.parse(JSON.stringify(value));
+}
+
+function resolveEnvironmentLabel(config, runtimeEnvironmentKey) {
+  const environment = isPlainObject(config?.environment) ? config.environment : null;
+  if (!environment) {
+    return "";
+  }
+
+  const labelsByKey = isPlainObject(environment.labelsByKey) ? environment.labelsByKey : null;
+  if (!labelsByKey) {
+    return "";
+  }
+
+  const label = normalizeEnvironmentLabel(labelsByKey[runtimeEnvironmentKey]);
+  return label || "";
+}
+
+function applyEnvironmentLabel(template, runtimeEnvironmentKey, environmentLabel) {
+  const next = cloneObject(template);
+  next.environment = isPlainObject(next.environment) ? next.environment : {};
+
+  const labelsByKey = isPlainObject(next.environment.labelsByKey)
+    ? { ...next.environment.labelsByKey }
+    : {};
+
+  labelsByKey[runtimeEnvironmentKey] = environmentLabel;
+
+  next.environment.labelsByKey = labelsByKey;
+  next.environment.lastConfiguredKey = runtimeEnvironmentKey;
+  return next;
 }
 
 function isPlaceholder(value) {
@@ -72,6 +147,24 @@ async function askChoice(rl, promptText, choices, fallbackKey) {
   }
 }
 
+async function askEnvironmentLabel(rl, fallbackLabel) {
+  const suffix = fallbackLabel ? ` [기본값: ${fallbackLabel}]` : "";
+
+  while (true) {
+    const answer = (await ask(
+      rl,
+      `현재 OpenCode 실행 환경 레이블을 입력해 주세요 (예: 집-PC, 회사-노트북, WSL-main)${suffix}: `
+    )).trim();
+
+    const normalized = normalizeEnvironmentLabel(answer || fallbackLabel);
+    if (normalized) {
+      return normalized;
+    }
+
+    process.stdout.write("환경 레이블은 비어 있을 수 없습니다. 1~60자로 입력해 주세요.\n");
+  }
+}
+
 function applyDiscordFields(template, token, targetType, targetId, mentionUserId) {
   const next = cloneObject(template);
   next.discord = isPlainObject(next.discord) ? next.discord : {};
@@ -102,18 +195,37 @@ async function main() {
   const pluginTemplatePath = resolve(repoRoot, "opencode-notifier-plugin.config.example.json");
   const cliConfigPath = resolve(repoRoot, "opencode-notifier.config.json");
   const pluginConfigPath = join(homedir(), ".config", "opencode", "opencode-notifier-plugin.json");
+  const runtimeEnvironmentKey = resolveRuntimeEnvironmentKey();
+
+  const existingCliConfig = await readJsonIfExists(cliConfigPath);
+  const existingPluginConfig = await readJsonIfExists(pluginConfigPath);
+  const hasExistingConfig = Boolean(existingCliConfig || existingPluginConfig);
+  const existingEnvironmentLabel =
+    resolveEnvironmentLabel(existingPluginConfig, runtimeEnvironmentKey)
+    || resolveEnvironmentLabel(existingCliConfig, runtimeEnvironmentKey);
+  const hasCurrentEnvironmentLabel = Boolean(existingEnvironmentLabel);
 
   if (isPostinstallMode && process.env.OPENCODE_NOTIFIER_SKIP_SETUP === "1") {
     return;
   }
 
-  if (isPostinstallMode && (existsSync(cliConfigPath) || existsSync(pluginConfigPath))) {
+  if (isPostinstallMode && hasExistingConfig && hasCurrentEnvironmentLabel) {
     return;
   }
 
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
     if (isPostinstallMode) {
-      process.stdout.write("OpenCode notifier: 초기 설정은 건너뛰었습니다. 필요하면 'npm run setup'을 실행하세요.\n");
+      if (hasExistingConfig && !hasCurrentEnvironmentLabel) {
+        process.stdout.write(
+          [
+            "OpenCode notifier: 현재 실행 환경 레이블이 아직 등록되지 않았습니다.",
+            `- 환경 키: ${runtimeEnvironmentKey}`,
+            "- 다음 명령으로 레이블을 등록해 주세요: npm run setup"
+          ].join("\n") + "\n"
+        );
+      } else {
+        process.stdout.write("OpenCode notifier: 초기 설정은 건너뛰었습니다. 필요하면 'npm run setup'을 실행하세요.\n");
+      }
       return;
     }
 
@@ -137,6 +249,7 @@ async function main() {
   let targetType = "channel";
   let targetId = "";
   let mentionUserId = "";
+  let environmentLabel = existingEnvironmentLabel;
   let installPluginNow = true;
 
   try {
@@ -203,6 +316,18 @@ async function main() {
       mentionUserId = "";
     }
 
+    if (hasExistingConfig && !existingEnvironmentLabel) {
+      process.stdout.write(
+        [
+          "\n현재 실행 환경은 아직 레이블이 등록되지 않았습니다.",
+          `- 환경 키: ${runtimeEnvironmentKey}`,
+          "- 아래에서 이 환경에 사용할 레이블을 지정해 주세요."
+        ].join("\n") + "\n"
+      );
+    }
+
+    environmentLabel = await askEnvironmentLabel(rl, existingEnvironmentLabel);
+
     if (modeChoice === "1" || modeChoice === "3") {
       const installChoice = await askChoice(
         rl,
@@ -223,12 +348,16 @@ async function main() {
   const shouldWriteCli = modeChoice === "2" || modeChoice === "3";
 
   if (shouldWriteCli) {
-    const cliConfig = applyDiscordFields(cliTemplate, token, targetType, targetId, mentionUserId);
+    const cliBase = existingCliConfig || cliTemplate;
+    const cliWithDiscord = applyDiscordFields(cliBase, token, targetType, targetId, mentionUserId);
+    const cliConfig = applyEnvironmentLabel(cliWithDiscord, runtimeEnvironmentKey, environmentLabel);
     await writeJson(cliConfigPath, cliConfig);
   }
 
   if (shouldWritePlugin) {
-    const pluginConfig = applyDiscordFields(pluginTemplate, token, targetType, targetId, mentionUserId);
+    const pluginBase = existingPluginConfig || pluginTemplate;
+    const pluginWithDiscord = applyDiscordFields(pluginBase, token, targetType, targetId, mentionUserId);
+    const pluginConfig = applyEnvironmentLabel(pluginWithDiscord, runtimeEnvironmentKey, environmentLabel);
     await writeJson(pluginConfigPath, pluginConfig);
   }
 
@@ -248,6 +377,8 @@ async function main() {
       lines.push("- 플러그인 미설치 상태라면 수동 실행: npm run plugin:install");
     }
   }
+  lines.push(`- 환경 레이블: ${environmentLabel}`);
+  lines.push(`- 환경 키: ${runtimeEnvironmentKey}`);
 
   process.stdout.write(`${lines.join("\n")}\n`);
 }

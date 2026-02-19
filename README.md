@@ -21,7 +21,7 @@ OpenCode 출력 로그를 감시해서,
 - 메타데이터 포함 여부 (`includeMetadata`)
 - 원문 추가 첨부 (`includeRawInCodeBlock`)
 - 감지 패턴/쿨다운/윈도우 모두 설정 가능
-- 알림 제목을 `작업공간 - 대화 제목` 형태로 자동 구성
+- 알림 제목을 `message.title | 작업공간 - 대화 제목` 형태로 자동 구성
 - 취소/중단 이벤트가 발생하면 마지막 메시지 대신 상태 알림 전송
 
 ## 설치
@@ -48,6 +48,7 @@ npm run setup
 - 디스코드 봇 토큰
 - 채널 ID 또는 DM 유저 ID
 - (선택) 멘션 유저 ID
+- 현재 실행 환경 레이블 (예: `집-PC`, `회사-노트북`, `WSL-main`)
 - 플러그인 모드/CLI 모드 선택
 
 직접 파일을 편집하고 싶으면 기존 방식도 가능합니다.
@@ -148,6 +149,10 @@ npm run start -- --config ./opencode-notifier.config.json --profile desktop-main
 `profiles.desktop-main` 같은 블록을 두고 PC별로 `openCode.command`, `cwd`, `discord.targets`를 분리하면
 동일 저장소를 여러 데스크탑에 그대로 복제해도 빠르게 적용할 수 있습니다.
 
+추가로 알림기는 실행 환경 키(플랫폼/호스트/사용자 기반)를 자동 계산하고,
+설정된 `environment.labelsByKey`에서 레이블을 찾아 제목에 `[환경 레이블]` 형태로 표시합니다.
+현재 환경 키가 미등록이면 `npm run setup`으로 레이블 등록을 안내합니다.
+
 ### 3) Discord API 없이 payload 확인
 
 ```bash
@@ -218,6 +223,8 @@ npm run plugin:uninstall
   - OpenCode 로그 형식이 명확할 때 마지막 assistant 블록 추출 정확도를 높임
 - `discord.targets`
   - 여러 타겟 동시 전송 가능
+- `environment.labelsByKey`
+  - 실행 환경 키별 레이블 매핑. setup에서 입력한 레이블이 여기에 저장되고, 디스코드 제목에 반영됨
 - `profiles`
   - 데스크탑/환경별 오버라이드 묶음. `--profile <name>`으로 선택
 
@@ -258,13 +265,15 @@ https://discord.com/api/oauth2/authorize?client_id=YOUR_CLIENT_ID&scope=bot&perm
 ## 알림 포맷 예시
 
 ```text
-OpenCodeNotifier - 결제 오류 원인 분석
+[desktop-main] OpenCode Build Finished ~ | OpenCodeNotifier - 결제 오류 원인 분석
 
 - 핵심 포인트 1 ...
 - 핵심 포인트 2 ...
 - 핵심 포인트 3 ...
 - 핵심 포인트 4 ...
 ```
+
+여러 환경에서 같은 채널로 보내도 헤더의 `[환경 레이블]`로 어느 머신 알림인지 바로 구분할 수 있습니다.
 
 ## 트러블슈팅
 
@@ -284,6 +293,15 @@ OpenCodeNotifier - 결제 오류 원인 분석
   - 플러그인 모드는 `session.status: idle` / `session.idle` 이벤트를 직접 받아 트리거합니다.
 - 응답 생성 중 취소/중단했다면:
   - 마지막 assistant 본문 대신 `이번 응답은 사용자가 취소했습니다.` 또는 `이번 응답은 중단되었습니다.` 형태의 상태 알림이 전송됩니다.
+- `[search-mode]`, `[analyze-mode]`, `<analysis>` 같은 중간 분석 프롬프트가 알림으로 오면:
+  - 최신 플러그인은 해당 패턴을 자동으로 제외하고, 실제 assistant 응답만 알림으로 보냅니다.
+  - 반영이 안 되면 `git pull` 후 `npm run plugin:install`을 다시 실행하고 IDE를 재시작하세요.
+- 실행할 때 `현재 실행 환경 레이블이 등록되지 않았습니다`가 보이면:
+  - 해당 환경 키가 아직 `environment.labelsByKey`에 없습니다.
+  - `npm run setup`을 실행해 현재 환경 레이블을 등록해 주세요.
+- 세션 제목이 계속 `새 작업`으로 보이면:
+  - 최신 플러그인은 `session.updated`의 `info.id`/`info.title`을 반영하고, generic 제목이 기존 실제 제목을 덮어쓰지 않도록 처리합니다.
+  - `git pull` 후 `npm run plugin:install` 실행, IDE 재시작으로 갱신하세요.
 - "알림이 두 번씩 온다"면:
   - 최신 코드 기준 기본값은 `session.idle`만 사용하므로, 먼저 `npm run setup`으로 설정을 다시 저장하세요.
   - 플러그인 설정에서 `trigger.notifyOnStatusIdle`가 `true`이면 `false`로 바꾸고 IDE를 재시작하세요.

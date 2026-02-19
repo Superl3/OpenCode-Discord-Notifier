@@ -25,6 +25,32 @@ function truncateText(value, maxChars) {
   return `${text.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
 }
 
+function formatDurationMs(value) {
+  if (!Number.isFinite(value) || value < 0) {
+    return "측정 불가";
+  }
+
+  const roundedMs = Math.round(value);
+  if (roundedMs < 1000) {
+    return `${roundedMs}ms`;
+  }
+
+  const totalSeconds = Math.round(roundedMs / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  if (hours > 0) {
+    return `${hours}시간 ${minutes}분 ${seconds}초`;
+  }
+
+  if (minutes > 0) {
+    return `${minutes}분 ${seconds}초`;
+  }
+
+  return `${seconds}초`;
+}
+
 function heuristicSummary(text, maxBullets) {
   const cleaned = normalizeText(text)
     .replace(/```[\s\S]*?```/g, " ")
@@ -96,6 +122,9 @@ function buildDefaultConfig() {
       targets: [],
       mentionUserId: null,
       timeoutMs: 10000
+    },
+    environment: {
+      labelsByKey: {}
     }
   };
 }
@@ -159,6 +188,64 @@ function normalizeSingleLine(value, maxChars = 120) {
   return truncateText(text, maxChars);
 }
 
+function normalizeEnvironmentLabel(value) {
+  return normalizeSingleLine(value, 60);
+}
+
+function normalizeEnvironmentKey(value) {
+  return normalizeSingleLine(value, 160);
+}
+
+function resolveRuntimeEnvironmentKey() {
+  const explicit = normalizeEnvironmentKey(process.env.OPENCODE_ENV_KEY);
+  if (explicit) {
+    return explicit;
+  }
+
+  const host = normalizeSingleLine(
+    process.env.OPENCODE_ENV_HOST || process.env.COMPUTERNAME || process.env.HOSTNAME || "unknown-host",
+    60
+  ).toLowerCase();
+  const user = normalizeSingleLine(
+    process.env.OPENCODE_ENV_USER || process.env.USERNAME || process.env.USER || "unknown-user",
+    60
+  ).toLowerCase();
+
+  return `${process.platform}:${host}:${user}`;
+}
+
+function sanitizeEnvironmentLabels(rawLabels) {
+  if (!isPlainObject(rawLabels)) {
+    return {};
+  }
+
+  const labelsByKey = {};
+  for (const [rawKey, rawLabel] of Object.entries(rawLabels)) {
+    const key = normalizeEnvironmentKey(rawKey);
+    const label = normalizeEnvironmentLabel(rawLabel);
+    if (!key || !label) {
+      continue;
+    }
+
+    labelsByKey[key] = label;
+  }
+
+  return labelsByKey;
+}
+
+function resolveEnvironmentRuntime(rawEnvironment) {
+  const runtimeKey = resolveRuntimeEnvironmentKey();
+  const environment = isPlainObject(rawEnvironment) ? rawEnvironment : {};
+  const labelsByKey = sanitizeEnvironmentLabels(environment.labelsByKey);
+  const label = labelsByKey[runtimeKey] || "";
+
+  return {
+    runtimeKey,
+    label,
+    requiresSetup: !label
+  };
+}
+
 function resolveWorkspaceName(directory, worktree) {
   const root = resolve(worktree || directory || process.cwd());
   const name = normalizeSingleLine(basename(root), 80);
@@ -168,18 +255,25 @@ function resolveWorkspaceName(directory, worktree) {
 function extractSessionTitle(event) {
   const props = event?.properties ?? {};
   const candidates = [
-    props.title,
-    props.sessionTitle,
-    props.session?.title,
-    props.info?.sessionTitle,
     props.info?.title,
     props.info?.session?.title,
-    props.part?.sessionTitle,
+    props.info?.sessionTitle,
+    props.info?.name,
+    props.info?.session?.name,
     props.part?.title,
     props.part?.session?.title,
+    props.part?.sessionTitle,
+    props.part?.name,
+    props.part?.session?.name,
+    props.session?.title,
+    props.session?.name,
     props.status?.title,
+    props.title,
+    props.sessionTitle,
     event?.title
   ];
+
+  let genericFallback = "";
 
   for (const value of candidates) {
     if (typeof value !== "string") {
@@ -188,11 +282,107 @@ function extractSessionTitle(event) {
 
     const normalized = normalizeSingleLine(value);
     if (normalized) {
-      return normalized;
+      if (!isGenericSessionTitle(normalized)) {
+        return normalized;
+      }
+
+      if (!genericFallback) {
+        genericFallback = normalized;
+      }
     }
   }
 
-  return "";
+  return genericFallback;
+}
+
+function isGenericSessionTitle(value) {
+  const normalized = normalizeSingleLine(value, 200).toLowerCase();
+  if (!normalized) {
+    return true;
+  }
+
+  if (
+    normalized === "새 작업" ||
+    normalized === "새 세션" ||
+    normalized === "new task" ||
+    normalized === "new session" ||
+    normalized === "new chat" ||
+    normalized === "untitled"
+  ) {
+    return true;
+  }
+
+  if (/^(new session|child session)\s*-\s*\d{4}-\d{2}-\d{2}t\d{2}:\d{2}:\d{2}\.\d{3}z$/i.test(normalized)) {
+    return true;
+  }
+
+  return false;
+}
+
+function shouldApplySessionTitle(currentTitle, nextTitle) {
+  const nextNormalized = normalizeSingleLine(nextTitle, 200);
+  if (!nextNormalized) {
+    return false;
+  }
+
+  const nextIsGeneric = isGenericSessionTitle(nextNormalized);
+
+  const currentNormalized = normalizeSingleLine(currentTitle, 200);
+  if (!currentNormalized) {
+    return !nextIsGeneric;
+  }
+
+  if (currentNormalized === nextNormalized) {
+    return false;
+  }
+
+  const currentIsGeneric = isGenericSessionTitle(currentNormalized);
+
+  if (currentIsGeneric && nextIsGeneric) {
+    return false;
+  }
+
+  if (!currentIsGeneric && nextIsGeneric) {
+    return false;
+  }
+
+  return true;
+}
+
+function isIntermediateAnalysisMessage(value) {
+  const text = normalizeText(value);
+  if (!text) {
+    return false;
+  }
+
+  const hardMarkers = [
+    /\[search-mode\]/i,
+    /\[analyze-mode\]/i,
+    /<analysis>/i,
+    /launch multiple background agents/i,
+    /do not edit files; rely on repository read\/search only/i
+  ];
+
+  if (hardMarkers.some((marker) => marker.test(text))) {
+    return true;
+  }
+
+  const markers = [
+    /literal request\s*:/i,
+    /actual need\*{0,2}\s*:/i,
+    /success looks like\*{0,2}\s*:/i,
+    /opencode\s*-\s*ses_[a-z0-9]+/i,
+    /maximize search effort/i
+  ];
+
+  let markerHits = 0;
+  for (const marker of markers) {
+    if (marker.test(text)) {
+      markerHits += 1;
+    }
+  }
+
+  return markerHits >= 2;
 }
 
 function classifyTerminationKind(value) {
@@ -277,6 +467,7 @@ function normalizeRuntimeConfig(raw) {
   const messageMode = ["raw", "cleaned", "summary"].includes(merged.message?.mode)
     ? merged.message.mode
     : "summary";
+  const environment = resolveEnvironmentRuntime(merged.environment);
 
   return {
     enabled: merged.enabled !== false,
@@ -310,8 +501,37 @@ function normalizeRuntimeConfig(raw) {
         ? merged.discord.mentionUserId
         : null,
       timeoutMs: Number.isFinite(merged.discord?.timeoutMs) ? merged.discord.timeoutMs : 10000
-    }
+    },
+    environment
   };
+}
+
+function buildUnregisteredEnvironmentNotice(runtimeKey) {
+  return [
+    "⚠️ **현재 실행 환경 레이블이 등록되지 않았습니다.**",
+    `- 환경 키: \`${truncateText(runtimeKey, 120)}\``,
+    "- 해결: `npm run setup`을 실행해서 이 환경의 레이블을 등록해 주세요."
+  ].join("\n");
+}
+
+function getDisplayEnvironmentLabel(environment) {
+  return environment?.label || "미등록 환경";
+}
+
+function shouldShowEnvironmentNotice(environment) {
+  return Boolean(environment?.requiresSetup && environment?.runtimeKey);
+}
+
+function buildHeaderTitle(config, state) {
+  const sessionLabel = state.sessionTitle || state.sessionID;
+  const sessionHeader = `${state.workspaceName} - ${sessionLabel}`;
+  const titlePrefix = normalizeSingleLine(config.message.title, 120);
+  const environmentLabel = getDisplayEnvironmentLabel(config.environment);
+  const decoratedTitle = titlePrefix
+    ? `[${environmentLabel}] ${titlePrefix}`
+    : `[${environmentLabel}]`;
+
+  return `${decoratedTitle} | ${sessionHeader}`;
 }
 
 async function resolveConfig(directory, worktree) {
@@ -347,6 +567,7 @@ async function resolveConfig(directory, worktree) {
       enabled: true,
       message: loaded.message,
       discord: loaded.discord,
+      environment: loaded.environment,
       trigger: {
         notifyOnSessionIdle: true,
         notifyOnStatusIdle: false,
@@ -364,10 +585,11 @@ async function resolveConfig(directory, worktree) {
 
 function buildMessageBody(config, state, triggerKind, options = {}) {
   const terminationNotice = options.terminationNotice ?? null;
+  const measuredAt = Number.isFinite(options.measuredAt) ? options.measuredAt : Date.now();
+  const elapsedMs = Number.isFinite(options.elapsedMs) && options.elapsedMs >= 0 ? options.elapsedMs : null;
   const normalized = normalizeText(state.lastAssistantText);
   const missing = "마지막 assistant 메시지를 아직 찾지 못했습니다.";
-  const sessionLabel = state.sessionTitle || state.sessionID;
-  const headerTitle = `${state.workspaceName} - ${sessionLabel}`;
+  const headerTitle = buildHeaderTitle(config, state);
 
   let body = "";
   if (terminationNotice) {
@@ -385,13 +607,23 @@ function buildMessageBody(config, state, triggerKind, options = {}) {
 
   const sections = [`**${headerTitle}**`];
 
+  if (shouldShowEnvironmentNotice(config.environment)) {
+    sections.push(buildUnregisteredEnvironmentNotice(config.environment.runtimeKey));
+  }
+
   if (config.message.includeMetadata) {
+    const metadataLines = [
+      `- 시간: ${new Date(measuredAt).toLocaleString("ko-KR", { timeZone: "Asia/Seoul" })}`,
+      `- 트리거: ${triggerKind}`,
+      `- 모드: ${config.message.mode}`
+    ];
+
+    if (elapsedMs !== null) {
+      metadataLines.splice(1, 0, `- 경과 시간: ${formatDurationMs(elapsedMs)}`);
+    }
+
     sections.push(
-      [
-        `- 시간: ${new Date().toLocaleString("ko-KR", { timeZone: "Asia/Seoul" })}`,
-        `- 트리거: ${triggerKind}`,
-        `- 모드: ${config.message.mode}`
-      ].join("\n")
+      metadataLines.join("\n")
     );
   }
 
@@ -439,12 +671,15 @@ function createSessionState(sessionID, workspaceName) {
     workspaceName,
     sessionTitle: "",
     assistantMessageIds: new Set(),
+    mutedAssistantMessageIds: new Set(),
     textByMessageId: new Map(),
     lastAssistantMessageId: null,
     lastAssistantText: "",
     lastNotifiedMessageId: null,
     lastNotifiedTextKey: "",
     lastNotifiedAt: 0,
+    responseStartedAt: 0,
+    lastAssistantUpdatedAt: 0,
     waitingForInputReady: false,
     pendingTerminationNotice: null
   };
@@ -464,6 +699,10 @@ function getSessionID(event) {
     return props.part.sessionID;
   }
 
+  if (typeof props?.info?.id === "string" && typeof event?.type === "string" && event.type.startsWith("session.")) {
+    return props.info.id;
+  }
+
   return null;
 }
 
@@ -472,6 +711,16 @@ export default async function OpenCodeNotifierPlugin(input) {
   const workspaceName = resolveWorkspaceName(input.directory, input.worktree);
   const stateBySession = new Map();
   const dmChannelCache = new Map();
+
+  if (config.environment.requiresSetup) {
+    process.stderr.write(
+      [
+        "[opencode-notifier-plugin] 현재 실행 환경 레이블이 등록되지 않았습니다.",
+        `환경 키: ${config.environment.runtimeKey}`,
+        "`npm run setup`을 실행해서 이 환경 레이블을 등록해 주세요."
+      ].join(" ") + "\n"
+    );
+  }
 
   function getState(sessionID) {
     if (!stateBySession.has(sessionID)) {
@@ -544,6 +793,10 @@ export default async function OpenCodeNotifierPlugin(input) {
       return;
     }
 
+    if (!terminationNotice && isIntermediateAnalysisMessage(state.lastAssistantText)) {
+      return;
+    }
+
     if (
       !terminationNotice &&
       state.lastAssistantMessageId &&
@@ -564,11 +817,20 @@ export default async function OpenCodeNotifierPlugin(input) {
       return;
     }
 
-    const content = buildMessageBody(config, state, triggerKind, { terminationNotice });
+    const startedAt = state.responseStartedAt || state.lastAssistantUpdatedAt;
+    const elapsedMs = startedAt > 0 ? Math.max(0, now - startedAt) : null;
+
+    const content = buildMessageBody(config, state, triggerKind, {
+      terminationNotice,
+      measuredAt: now,
+      elapsedMs
+    });
     await sendNotification(content);
-    state.lastNotifiedAt = Date.now();
+    state.lastNotifiedAt = now;
     state.lastNotifiedMessageId = state.lastAssistantMessageId;
     state.lastNotifiedTextKey = currentTextKey;
+    state.responseStartedAt = 0;
+    state.lastAssistantUpdatedAt = 0;
     state.waitingForInputReady = false;
     state.pendingTerminationNotice = null;
   }
@@ -584,21 +846,35 @@ export default async function OpenCodeNotifierPlugin(input) {
       const props = event.properties ?? {};
       const sessionTitle = extractSessionTitle(event);
 
-      if (sessionTitle) {
+      if (shouldApplySessionTitle(state.sessionTitle, sessionTitle)) {
         state.sessionTitle = sessionTitle;
       }
 
       if (event.type === "message.updated") {
         const info = props.info;
         if (info?.role === "assistant" && typeof info.id === "string") {
+          const now = Date.now();
+
           state.assistantMessageIds.add(info.id);
-          state.lastAssistantMessageId = info.id;
-          state.waitingForInputReady = info.id !== state.lastNotifiedMessageId;
+          state.waitingForInputReady = false;
           state.pendingTerminationNotice = null;
+
+          if (!state.responseStartedAt) {
+            state.responseStartedAt = now;
+          }
 
           const cachedText = state.textByMessageId.get(info.id);
           if (typeof cachedText === "string" && cachedText.trim()) {
+            if (isIntermediateAnalysisMessage(cachedText)) {
+              state.mutedAssistantMessageIds.add(info.id);
+              return;
+            }
+
+            state.mutedAssistantMessageIds.delete(info.id);
+            state.lastAssistantMessageId = info.id;
             state.lastAssistantText = cachedText;
+            state.lastAssistantUpdatedAt = now;
+            state.waitingForInputReady = info.id !== state.lastNotifiedMessageId;
           }
         }
         return;
@@ -610,11 +886,29 @@ export default async function OpenCodeNotifierPlugin(input) {
           return;
         }
 
+        const now = Date.now();
         const nextText = normalizeText(part.text ?? "");
         state.textByMessageId.set(part.messageID, nextText);
 
         if (state.assistantMessageIds.has(part.messageID) || state.lastAssistantMessageId === part.messageID) {
+          if (!state.responseStartedAt) {
+            state.responseStartedAt = now;
+          }
+
+          if (isIntermediateAnalysisMessage(nextText)) {
+            state.mutedAssistantMessageIds.add(part.messageID);
+            if (state.lastAssistantMessageId === part.messageID) {
+              state.lastAssistantMessageId = null;
+              state.lastAssistantText = "";
+            }
+            state.waitingForInputReady = false;
+            return;
+          }
+
+          state.mutedAssistantMessageIds.delete(part.messageID);
+          state.lastAssistantMessageId = part.messageID;
           state.lastAssistantText = nextText;
+          state.lastAssistantUpdatedAt = now;
           state.waitingForInputReady = part.messageID !== state.lastNotifiedMessageId;
           state.pendingTerminationNotice = null;
         }
@@ -638,6 +932,7 @@ export default async function OpenCodeNotifierPlugin(input) {
         }
 
         if (statusType === "busy" || statusType === "retry") {
+          state.responseStartedAt = Date.now();
           state.waitingForInputReady = state.lastAssistantMessageId !== state.lastNotifiedMessageId;
           state.pendingTerminationNotice = null;
           return;

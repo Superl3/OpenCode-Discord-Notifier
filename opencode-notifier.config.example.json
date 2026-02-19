@@ -61,6 +61,9 @@
     "mentionUserId": null,
     "timeoutMs": 10000
   },
+  "environment": {
+    "labelsByKey": {}
+  },
   "profiles": {
     "desktop-main": {
       "openCode": {

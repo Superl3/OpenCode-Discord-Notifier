@@ -25,5 +25,8 @@
     ],
     "mentionUserId": null,
     "timeoutMs": 10000
+  },
+  "environment": {
+    "labelsByKey": {}
   }
 }

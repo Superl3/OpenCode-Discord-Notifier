@@ -216,8 +216,105 @@ function truncateText(value, maxChars) {
   return `${value.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
 }
 
+function normalizeSingleLine(value, maxChars = 120) {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  if (!text) {
+    return "";
+  }
+
+  return truncateText(text, maxChars);
+}
+
+function normalizeEnvironmentLabel(value) {
+  return normalizeSingleLine(value, 60);
+}
+
+function normalizeEnvironmentKey(value) {
+  return normalizeSingleLine(value, 160);
+}
+
+function resolveRuntimeEnvironmentKey() {
+  const explicit = normalizeEnvironmentKey(process.env.OPENCODE_ENV_KEY);
+  if (explicit) {
+    return explicit;
+  }
+
+  const host = normalizeSingleLine(
+    process.env.OPENCODE_ENV_HOST || process.env.COMPUTERNAME || process.env.HOSTNAME || "unknown-host",
+    60
+  ).toLowerCase();
+  const user = normalizeSingleLine(
+    process.env.OPENCODE_ENV_USER || process.env.USERNAME || process.env.USER || "unknown-user",
+    60
+  ).toLowerCase();
+
+  return `${process.platform}:${host}:${user}`;
+}
+
+function formatDurationMs(value) {
+  if (!Number.isFinite(value) || value < 0) {
+    return "측정 불가";
+  }
+
+  const roundedMs = Math.round(value);
+  if (roundedMs < 1000) {
+    return `${roundedMs}ms`;
+  }
+
+  const totalSeconds = Math.round(roundedMs / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  if (hours > 0) {
+    return `${hours}시간 ${minutes}분 ${seconds}초`;
+  }
+
+  if (minutes > 0) {
+    return `${minutes}분 ${seconds}초`;
+  }
+
+  return `${seconds}초`;
+}
+
 function normalizeBufferLine(line) {
   return stripAnsi(line).replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function isIntermediateAnalysisMessage(value) {
+  const text = normalizeMultilineText(String(value ?? ""));
+  if (!text) {
+    return false;
+  }
+
+  const hardMarkers = [
+    /\[search-mode\]/i,
+    /\[analyze-mode\]/i,
+    /<analysis>/i,
+    /launch multiple background agents/i,
+    /do not edit files; rely on repository read\/search only/i
+  ];
+
+  if (hardMarkers.some((marker) => marker.test(text))) {
+    return true;
+  }
+
+  const softMarkers = [
+    /literal request\s*:/i,
+    /actual need\*{0,2}\s*:/i,
+    /success looks like\*{0,2}\s*:/i,
+    /maximize search effort/i,
+    /opencode\s*-\s*ses_[a-z0-9]+/i
+  ];
+
+  let markerHits = 0;
+  for (const marker of softMarkers) {
+    if (marker.test(text)) {
+      markerHits += 1;
+    }
+  }
+
+  return markerHits >= 2;
 }
 
 function heuristicSummary(text, maxBullets) {
@@ -265,6 +362,38 @@ function parseJsonObject(text) {
 
 function isPlainObject(value) {
   return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function sanitizeEnvironmentLabels(rawLabels) {
+  if (!isPlainObject(rawLabels)) {
+    return {};
+  }
+
+  const labelsByKey = {};
+  for (const [rawKey, rawLabel] of Object.entries(rawLabels)) {
+    const key = normalizeEnvironmentKey(rawKey);
+    const label = normalizeEnvironmentLabel(rawLabel);
+    if (!key || !label) {
+      continue;
+    }
+
+    labelsByKey[key] = label;
+  }
+
+  return labelsByKey;
+}
+
+function resolveEnvironmentRuntime(rawEnvironment) {
+  const runtimeKey = resolveRuntimeEnvironmentKey();
+  const environment = isPlainObject(rawEnvironment) ? rawEnvironment : {};
+  const labelsByKey = sanitizeEnvironmentLabels(environment.labelsByKey);
+  const label = labelsByKey[runtimeKey] || "";
+
+  return {
+    runtimeKey,
+    label,
+    requiresSetup: !label
+  };
 }
 
 function deepMerge(base, override) {
@@ -407,6 +536,7 @@ function buildRuntimeConfig(config, cliOptions) {
   const message = mergedConfig.message ?? {};
   const parser = mergedConfig.parser ?? {};
   const discord = mergedConfig.discord ?? {};
+  const environment = mergedConfig.environment ?? {};
 
   const commandConfig = cliOptions.commandOverride ?? {
     command: openCode.command ?? "opencode",
@@ -477,8 +607,71 @@ function buildRuntimeConfig(config, cliOptions) {
       targets,
       mentionUserId: typeof discord.mentionUserId === "string" ? discord.mentionUserId : null,
       timeoutMs: Number.isFinite(discord.timeoutMs) ? discord.timeoutMs : 10000
-    }
+    },
+    environment: resolveEnvironmentRuntime(environment)
   };
+}
+
+function buildEnvironmentLabelTitle(title, environmentLabel) {
+  if (!environmentLabel) {
+    return title;
+  }
+
+  return `[${environmentLabel}] ${title}`;
+}
+
+function buildUnregisteredEnvironmentNotice(runtimeKey) {
+  return [
+    "⚠️ **현재 실행 환경 레이블이 등록되지 않았습니다.**",
+    `- 환경 키: \`${truncateText(runtimeKey, 120)}\``,
+    "- 해결: `npm run setup`을 실행해서 이 환경의 레이블을 등록해 주세요."
+  ].join("\n");
+}
+
+function buildCommandPreview(config) {
+  return [config.openCode.command, ...config.openCode.args].join(" ").trim();
+}
+
+function buildMessageMetadata(config, measuredAt, elapsedMs) {
+  const commandPreview = buildCommandPreview(config);
+  const metadata = [
+    `- 시간: ${new Date(measuredAt).toLocaleString("ko-KR", { timeZone: "Asia/Seoul" })}`,
+    "- 트리거: 빌드 완료 -> 입력 대기",
+    `- 모드: ${config.message.mode}`,
+    `- 실행 명령: \`${truncateText(commandPreview, 120)}\``
+  ];
+
+  if (elapsedMs !== null) {
+    metadata.splice(1, 0, `- 경과 시간: ${formatDurationMs(elapsedMs)}`);
+  }
+
+  return metadata.join("\n");
+}
+
+function getDisplayEnvironmentLabel(environment) {
+  return environment?.label || "미등록 환경";
+}
+
+function shouldShowEnvironmentNotice(environment) {
+  return Boolean(environment?.requiresSetup && environment?.runtimeKey);
+}
+
+function createMessageHeader(config) {
+  const environmentLabel = getDisplayEnvironmentLabel(config.environment);
+  const title = buildEnvironmentLabelTitle(config.message.title, environmentLabel);
+  return `**${title}**`;
+}
+
+function createMetadataSection(config, measuredAt, elapsedMs) {
+  return buildMessageMetadata(config, measuredAt, elapsedMs);
+}
+
+function createEnvironmentNoticeSection(config) {
+  if (!shouldShowEnvironmentNotice(config.environment)) {
+    return "";
+  }
+
+  return buildUnregisteredEnvironmentNotice(config.environment.runtimeKey);
 }
 
 async function discordRequest({ token, path, method, body, timeoutMs }) {
@@ -515,24 +708,49 @@ class OpenCodeDiscordNotifier {
     this.notificationEnabled = true;
     this.notificationCount = 0;
     this.dmChannelCache = new Map();
+
+    if (this.config.environment.requiresSetup) {
+      logInfo(
+        [
+          "Current runtime environment label is missing.",
+          `environmentKey=${this.config.environment.runtimeKey}`,
+          "run `npm run setup` to register an environment label."
+        ].join(" ")
+      );
+    }
   }
 
   addBufferLine(line, source) {
     const normalized = normalizeBufferLine(line);
     if (!normalized) {
-      return;
+      return null;
     }
 
-    this.buffer.push({
+    const entry = {
       line: normalized,
       source,
       time: Date.now()
-    });
+    };
+
+    this.buffer.push(entry);
 
     const over = this.buffer.length - this.config.parser.maxBufferLines;
     if (over > 0) {
       this.buffer.splice(0, over);
     }
+
+    return entry;
+  }
+
+  findLastMatchingEntry(patterns) {
+    for (let i = this.buffer.length - 1; i >= 0; i -= 1) {
+      const entry = this.buffer[i];
+      if (matchesAny(entry.line, patterns)) {
+        return entry;
+      }
+    }
+
+    return null;
   }
 
   extractAssistantBlock() {
@@ -608,9 +826,11 @@ class OpenCodeDiscordNotifier {
     return lines.join("\n");
   }
 
-  buildMessageBody(rawMessage) {
-    const normalized = normalizeMultilineText(rawMessage);
+  buildMessageBody(rawMessage, metadata = {}) {
+    const normalized = normalizeMultilineText(String(rawMessage ?? ""));
     const missingMessageNotice = "마지막 메시지를 추출하지 못했습니다. parser 패턴을 조정해 주세요.";
+    const measuredAt = Number.isFinite(metadata.measuredAt) ? metadata.measuredAt : Date.now();
+    const elapsedMs = Number.isFinite(metadata.elapsedMs) && metadata.elapsedMs >= 0 ? metadata.elapsedMs : null;
 
     let renderedBody = normalized;
     if (!renderedBody) {
@@ -629,20 +849,16 @@ class OpenCodeDiscordNotifier {
         : renderedBody;
     }
 
-    const commandPreview = [this.config.openCode.command, ...this.config.openCode.args].join(" ").trim();
-
     const sections = [];
-    sections.push(`**${this.config.message.title}**`);
+    sections.push(createMessageHeader(this.config));
+
+    const environmentNotice = createEnvironmentNoticeSection(this.config);
+    if (environmentNotice) {
+      sections.push(environmentNotice);
+    }
 
     if (this.config.message.includeMetadata) {
-      sections.push(
-        [
-          `- 시간: ${new Date().toLocaleString("ko-KR", { timeZone: "Asia/Seoul" })}`,
-          "- 트리거: 빌드 완료 -> 입력 대기",
-          `- 모드: ${this.config.message.mode}`,
-          `- 실행 명령: \`${truncateText(commandPreview, 120)}\``
-        ].join("\n")
-      );
+      sections.push(createMetadataSection(this.config, measuredAt, elapsedMs));
     }
 
     sections.push(this.config.message.mode === "summary" ? "**요약된 마지막 메시지**" : "**마지막 메시지**");
@@ -732,8 +948,8 @@ class OpenCodeDiscordNotifier {
     }
   }
 
-  async notifyIfReady(triggerLine) {
-    const now = Date.now();
+  async notifyIfReady(triggerLine, triggerTime = Date.now()) {
+    const now = Number.isFinite(triggerTime) ? triggerTime : Date.now();
 
     if (!this.notificationEnabled) {
       return;
@@ -758,10 +974,34 @@ class OpenCodeDiscordNotifier {
     this.pendingNotification = true;
 
     try {
-      const extracted = this.extractAssistantBlock() || this.extractTailMessage();
-      const content = this.buildMessageBody(extracted);
+      const assistantBlock = normalizeMultilineText(this.extractAssistantBlock());
+      let extracted = assistantBlock;
+
+      if (!extracted) {
+        const tail = normalizeMultilineText(this.extractTailMessage());
+        if (!isIntermediateAnalysisMessage(tail)) {
+          extracted = tail;
+        }
+      }
+
+      if (extracted && isIntermediateAnalysisMessage(extracted)) {
+        logInfo("Skipped notification: extracted text looks like an intermediate analysis block.");
+        return;
+      }
+
+      let elapsedMs = null;
+      if (this.lastBuildCompleteAt) {
+        const startEntry = this.findLastMatchingEntry(this.config.detection.buildCompletePatterns);
+        const startAt = startEntry?.time ?? this.lastBuildCompleteAt;
+        elapsedMs = Math.max(0, now - startAt);
+      }
+
+      const content = this.buildMessageBody(extracted, {
+        measuredAt: now,
+        elapsedMs
+      });
       await this.sendToDiscord(content);
-      this.lastNotificationAt = Date.now();
+      this.lastNotificationAt = now;
       this.notificationCount += 1;
 
       logInfo(`Notification sent (count=${this.notificationCount}) on line: ${triggerLine}`);
@@ -778,7 +1018,7 @@ class OpenCodeDiscordNotifier {
   }
 
   async handleLine(line, source) {
-    this.addBufferLine(line, source);
+    const entry = this.addBufferLine(line, source);
 
     const normalized = normalizeBufferLine(line);
     if (!normalized) {
@@ -786,12 +1026,12 @@ class OpenCodeDiscordNotifier {
     }
 
     if (matchesAny(normalized, this.config.detection.buildCompletePatterns)) {
-      this.lastBuildCompleteAt = Date.now();
+      this.lastBuildCompleteAt = entry?.time ?? Date.now();
       logInfo(`Build completion matched: ${normalized}`);
     }
 
     if (matchesAny(normalized, this.config.detection.waitingInputPatterns)) {
-      await this.notifyIfReady(normalized);
+      await this.notifyIfReady(normalized, entry?.time ?? Date.now());
     }
   }
 
