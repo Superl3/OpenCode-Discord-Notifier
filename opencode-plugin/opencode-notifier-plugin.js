@@ -252,6 +252,33 @@ function resolveWorkspaceName(directory, worktree) {
   return name || "OpenCode";
 }
 
+function resolveOpenCodeUserConfigDirs() {
+  const dirs = [];
+
+  const explicit = normalizeSingleLine(process.env.OPENCODE_CONFIG_DIR || process.env.OPENCODE_CONFIG_HOME, 260);
+  if (explicit) {
+    dirs.push(resolve(explicit));
+  }
+
+  const xdgConfigHome = normalizeSingleLine(process.env.XDG_CONFIG_HOME, 260);
+  if (xdgConfigHome) {
+    dirs.push(join(xdgConfigHome, "opencode"));
+  }
+
+  const appData = normalizeSingleLine(process.env.APPDATA, 260);
+  if (appData) {
+    dirs.push(join(appData, "opencode"));
+  }
+
+  const localAppData = normalizeSingleLine(process.env.LOCALAPPDATA, 260);
+  if (localAppData) {
+    dirs.push(join(localAppData, "opencode"));
+  }
+
+  dirs.push(join(homedir(), ".config", "opencode"));
+  return [...new Set(dirs)];
+}
+
 function extractSessionTitle(event) {
   const props = event?.properties ?? {};
   const candidates = [
@@ -537,12 +564,12 @@ function buildHeaderTitle(config, state) {
 async function resolveConfig(directory, worktree) {
   const cwdRoot = resolve(directory || process.cwd());
   const worktreeRoot = resolve(worktree || cwdRoot);
-  const userConfigDir = join(homedir(), ".config", "opencode");
+  const userConfigDirs = resolveOpenCodeUserConfigDirs();
 
   const candidates = [
     join(worktreeRoot, ".opencode", "opencode-notifier-plugin.json"),
     join(cwdRoot, ".opencode", "opencode-notifier-plugin.json"),
-    join(userConfigDir, "opencode-notifier-plugin.json")
+    ...userConfigDirs.map((dir) => join(dir, "opencode-notifier-plugin.json"))
   ];
 
   for (const candidate of candidates) {
@@ -554,7 +581,8 @@ async function resolveConfig(directory, worktree) {
 
   const bridgeCandidates = [
     join(worktreeRoot, "opencode-notifier.config.json"),
-    join(cwdRoot, "opencode-notifier.config.json")
+    join(cwdRoot, "opencode-notifier.config.json"),
+    ...userConfigDirs.map((dir) => join(dir, "opencode-notifier.config.json"))
   ];
 
   for (const candidate of bridgeCandidates) {
@@ -642,14 +670,31 @@ function buildMessageBody(config, state, triggerKind, options = {}) {
   return truncateText(content, config.message.maxChars);
 }
 
+function resolveFetchImplementation() {
+  if (typeof fetch === "function") {
+    return fetch;
+  }
+
+  throw new Error("Global fetch is unavailable. Use Node.js 18+ or a runtime with fetch support.");
+}
+
+function resolveTimeoutSignal(timeoutMs) {
+  if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
+    return AbortSignal.timeout(timeoutMs);
+  }
+
+  return undefined;
+}
+
 async function discordRequest(config, path, method, body) {
-  const response = await fetch(`https://discord.com/api/v10${path}`, {
+  const fetchImpl = resolveFetchImplementation();
+  const response = await fetchImpl(`https://discord.com/api/v10${path}`, {
     method,
     headers: {
       Authorization: `Bot ${config.discord.botToken}`,
       "Content-Type": "application/json"
     },
-    signal: AbortSignal.timeout(config.discord.timeoutMs),
+    signal: resolveTimeoutSignal(config.discord.timeoutMs),
     body: body ? JSON.stringify(body) : undefined
   });
 
@@ -706,7 +751,14 @@ function getSessionID(event) {
   return null;
 }
 
+function createNoopHooks() {
+  return {
+    event: async () => {}
+  };
+}
+
 export default async function OpenCodeNotifierPlugin(input) {
+  try {
   const config = await resolveConfig(input.directory, input.worktree);
   const workspaceName = resolveWorkspaceName(input.directory, input.worktree);
   const stateBySession = new Map();
@@ -970,4 +1022,10 @@ export default async function OpenCodeNotifierPlugin(input) {
       }
     }
   };
+  } catch (error) {
+    process.stderr.write(
+      `[opencode-notifier-plugin] 플러그인 초기화 실패: ${error instanceof Error ? error.message : String(error)}\n`
+    );
+    return createNoopHooks();
+  }
 }

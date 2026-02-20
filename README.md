@@ -175,9 +175,8 @@ npm run plugin:install
 
 설치 스크립트는 아래를 자동으로 처리합니다.
 
-- `~/.config/opencode/opencode.json`의 `plugin` 배열에 `opencode-notifier-plugin` 추가
-- `~/.config/opencode/package.json`에 로컬 플러그인 dependency 추가
-- `npm install --prefix ~/.config/opencode` 실행
+- OpenCode 설정 파일(`opencode.json`)의 `plugin` 배열에 `file://.../opencode-plugin/opencode-notifier-plugin.js` 등록
+- 기존 `opencode-notifier-plugin` 문자열 엔트리가 있으면 제거 후 최신 file URI 엔트리로 교체
 
 적용 후 OpenCode IDE를 재시작하세요.
 

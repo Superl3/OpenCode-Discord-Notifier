@@ -2,28 +2,36 @@
 
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 const PLUGIN_NAME = "opencode-notifier-plugin";
-
-function toPosixPath(value) {
-  return String(value).replace(/\\/g, "/");
-}
+const PLUGIN_ENTRY_FILE = "opencode-notifier-plugin.js";
 
 function candidateConfigDirs() {
   const dirs = [];
-  const home = homedir();
 
-  dirs.push(join(home, ".config", "opencode"));
-
-  const appData = process.env.APPDATA;
-  if (appData) {
-    dirs.push(join(appData, "opencode"));
+  const explicit = process.env.OPENCODE_CONFIG_DIR || process.env.OPENCODE_CONFIG_HOME;
+  if (explicit) {
+    dirs.push(resolve(explicit));
   }
 
-  return dirs;
+  if (process.env.XDG_CONFIG_HOME) {
+    dirs.push(join(process.env.XDG_CONFIG_HOME, "opencode"));
+  }
+
+  if (process.env.APPDATA) {
+    dirs.push(join(process.env.APPDATA, "opencode"));
+  }
+
+  if (process.env.LOCALAPPDATA) {
+    dirs.push(join(process.env.LOCALAPPDATA, "opencode"));
+  }
+
+  dirs.push(join(homedir(), ".config", "opencode"));
+
+  return [...new Set(dirs)];
 }
 
 async function readJsonOrDefault(filePath, fallback) {
@@ -37,89 +45,71 @@ async function readJsonOrDefault(filePath, fallback) {
 
 async function ensureConfigDir() {
   const candidates = candidateConfigDirs();
-  const existing = candidates.find((dir) => existsSync(dir));
+  const existing =
+    candidates.find((dir) => existsSync(join(dir, "opencode.json")) || existsSync(join(dir, "package.json")))
+    || candidates.find((dir) => existsSync(dir));
+
   const target = existing || candidates[0];
   await mkdir(target, { recursive: true });
   return target;
 }
 
-async function updateOpenCodeConfig(configDir) {
+function isLegacyPluginEntry(entry) {
+  return typeof entry === "string" && (entry === PLUGIN_NAME || entry.startsWith(`${PLUGIN_NAME}@`));
+}
+
+function isNotifierFilePluginEntry(entry) {
+  if (typeof entry !== "string" || !entry.startsWith("file://")) {
+    return false;
+  }
+
+  try {
+    const url = new URL(entry);
+    const normalizedPath = decodeURIComponent(url.pathname).replace(/\\/g, "/").toLowerCase();
+    return (
+      normalizedPath.endsWith("/opencode-plugin/index.js")
+      || normalizedPath.endsWith(`/opencode-plugin/${PLUGIN_ENTRY_FILE}`)
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function updateOpenCodeConfig(configDir, pluginSpecifier) {
   const configPath = join(configDir, "opencode.json");
   const config = await readJsonOrDefault(configPath, {});
-  const plugins = Array.isArray(config.plugin) ? config.plugin : [];
+  const plugins = Array.isArray(config.plugin)
+    ? config.plugin.filter((entry) => !isLegacyPluginEntry(entry) && !isNotifierFilePluginEntry(entry))
+    : [];
 
-  if (!plugins.some((entry) => entry === PLUGIN_NAME || entry.startsWith(`${PLUGIN_NAME}@`))) {
-    plugins.push(PLUGIN_NAME);
-  }
+  plugins.push(pluginSpecifier);
 
   config.plugin = plugins;
   await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
   return configPath;
 }
 
-async function updateConfigPackage(configDir, pluginPackageDir) {
-  const packagePath = join(configDir, "package.json");
-  const pkg = await readJsonOrDefault(packagePath, {});
-
-  pkg.dependencies = typeof pkg.dependencies === "object" && pkg.dependencies
-    ? pkg.dependencies
-    : {};
-
-  pkg.dependencies[PLUGIN_NAME] = `file:${toPosixPath(pluginPackageDir)}`;
-
-  await writeFile(packagePath, `${JSON.stringify(pkg, null, 2)}\n`, "utf8");
-  return packagePath;
-}
-
-function installDependencies(configDir) {
-  const commands = process.platform === "win32"
-    ? [
-        { cmd: "npm.cmd", args: ["install", "--prefix", configDir], shell: false },
-        { cmd: "npm", args: ["install", "--prefix", configDir], shell: false },
-        {
-          cmd: process.env.ComSpec || "cmd.exe",
-          args: ["/d", "/s", "/c", "npm", "install", "--prefix", configDir],
-          shell: false
-        }
-      ]
-    : [{ cmd: "npm", args: ["install", "--prefix", configDir], shell: false }];
-
-  let lastError = null;
-
-  for (const item of commands) {
-    const install = spawnSync(item.cmd, item.args, {
-      stdio: "inherit",
-      shell: item.shell
-    });
-
-    if (install.status === 0) {
-      return;
-    }
-
-    if (install.error) {
-      lastError = install.error.message;
-    } else {
-      lastError = `exit code ${String(install.status)}`;
-    }
+function buildPluginSpecifier(repoRoot) {
+  const pluginEntryPath = resolve(repoRoot, "opencode-plugin", PLUGIN_ENTRY_FILE);
+  if (!existsSync(pluginEntryPath)) {
+    throw new Error(`플러그인 진입 파일을 찾지 못했습니다: ${pluginEntryPath}`);
   }
 
-  throw new Error(`npm install failed while installing OpenCode notifier plugin (${lastError ?? "unknown"}).`);
+  return pathToFileURL(pluginEntryPath).href;
 }
 
 async function main() {
   const repoRoot = resolve(process.cwd());
-  const pluginPackageDir = resolve(repoRoot, "opencode-plugin");
+  const pluginSpecifier = buildPluginSpecifier(repoRoot);
   const configDir = await ensureConfigDir();
 
-  const configPath = await updateOpenCodeConfig(configDir);
-  const packagePath = await updateConfigPackage(configDir, pluginPackageDir);
-  installDependencies(configDir);
+  const configPath = await updateOpenCodeConfig(configDir, pluginSpecifier);
 
   process.stdout.write(
     [
       "OpenCode notifier plugin 설치 완료",
       `- OpenCode config: ${configPath}`,
-      `- Plugin package: ${packagePath}`,
+      `- Plugin specifier: ${pluginSpecifier}`,
       "- 적용 후 OpenCode IDE를 재시작하면 플러그인 목록에서 확인할 수 있습니다."
     ].join("\n") + "\n"
   );
