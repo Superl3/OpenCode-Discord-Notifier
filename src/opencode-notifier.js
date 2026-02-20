@@ -674,14 +674,31 @@ function createEnvironmentNoticeSection(config) {
   return buildUnregisteredEnvironmentNotice(config.environment.runtimeKey);
 }
 
+function resolveFetchImplementation() {
+  if (typeof fetch === "function") {
+    return fetch;
+  }
+
+  throw new Error("Global fetch is unavailable. Use Node.js 18+ or a runtime with fetch support.");
+}
+
+function resolveTimeoutSignal(timeoutMs) {
+  if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
+    return AbortSignal.timeout(timeoutMs);
+  }
+
+  return undefined;
+}
+
 async function discordRequest({ token, path, method, body, timeoutMs }) {
-  const response = await fetch(`https://discord.com/api/v10${path}`, {
+  const fetchImpl = resolveFetchImplementation();
+  const response = await fetchImpl(`https://discord.com/api/v10${path}`, {
     method,
     headers: {
       Authorization: `Bot ${token}`,
       "Content-Type": "application/json"
     },
-    signal: AbortSignal.timeout(timeoutMs),
+    signal: resolveTimeoutSignal(timeoutMs),
     body: body ? JSON.stringify(body) : undefined
   });
 

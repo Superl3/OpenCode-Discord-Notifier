@@ -46,6 +46,55 @@ function resolveRuntimeEnvironmentKey() {
   return `${process.platform}:${host}:${user}`;
 }
 
+function candidateOpenCodeConfigDirs() {
+  const dirs = [];
+
+  const explicit = normalizeSingleLine(process.env.OPENCODE_CONFIG_DIR || process.env.OPENCODE_CONFIG_HOME, 260);
+  if (explicit) {
+    dirs.push(resolve(explicit));
+  }
+
+  const xdgConfigHome = normalizeSingleLine(process.env.XDG_CONFIG_HOME, 260);
+  if (xdgConfigHome) {
+    dirs.push(join(xdgConfigHome, "opencode"));
+  }
+
+  const appData = normalizeSingleLine(process.env.APPDATA, 260);
+  if (appData) {
+    dirs.push(join(appData, "opencode"));
+  }
+
+  const localAppData = normalizeSingleLine(process.env.LOCALAPPDATA, 260);
+  if (localAppData) {
+    dirs.push(join(localAppData, "opencode"));
+  }
+
+  dirs.push(join(homedir(), ".config", "opencode"));
+  dirs.push(resolve(process.cwd(), ".opencode"));
+  return [...new Set(dirs)];
+}
+
+function resolveOpenCodeConfigDir() {
+  const candidates = candidateOpenCodeConfigDirs();
+
+  const withNotifierConfig = candidates.find((dir) => existsSync(join(dir, "opencode-notifier-plugin.json")));
+  if (withNotifierConfig) {
+    return withNotifierConfig;
+  }
+
+  const withOpenCodeConfig = candidates.find((dir) => existsSync(join(dir, "opencode.json")));
+  if (withOpenCodeConfig) {
+    return withOpenCodeConfig;
+  }
+
+  const existingDir = candidates.find((dir) => existsSync(dir));
+  if (existingDir) {
+    return existingDir;
+  }
+
+  return candidates[0];
+}
+
 async function readJsonTemplate(filePath) {
   const raw = await readFile(filePath, "utf8");
   const parsed = JSON.parse(raw);
@@ -194,7 +243,8 @@ async function main() {
   const cliTemplatePath = resolve(repoRoot, "opencode-notifier.config.example.json");
   const pluginTemplatePath = resolve(repoRoot, "opencode-notifier-plugin.config.example.json");
   const cliConfigPath = resolve(repoRoot, "opencode-notifier.config.json");
-  const pluginConfigPath = join(homedir(), ".config", "opencode", "opencode-notifier-plugin.json");
+  const openCodeConfigDir = resolveOpenCodeConfigDir();
+  const pluginConfigPath = join(openCodeConfigDir, "opencode-notifier-plugin.json");
   const runtimeEnvironmentKey = resolveRuntimeEnvironmentKey();
 
   const existingCliConfig = await readJsonIfExists(cliConfigPath);
@@ -372,6 +422,7 @@ async function main() {
   }
   if (shouldWritePlugin) {
     lines.push(`- 플러그인 설정 파일: ${pluginConfigPath}`);
+    lines.push(`- OpenCode config dir: ${openCodeConfigDir}`);
     lines.push("- OpenCode IDE를 재시작하면 플러그인이 새 설정으로 동작합니다.");
     if (!installPluginNow) {
       lines.push("- 플러그인 미설치 상태라면 수동 실행: npm run plugin:install");
