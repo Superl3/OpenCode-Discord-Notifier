@@ -376,6 +376,23 @@ function shouldApplySessionTitle(currentTitle, nextTitle) {
   return true;
 }
 
+function isSubagentSessionTitle(value) {
+  const title = normalizeSingleLine(value, 240);
+  if (!title) {
+    return false;
+  }
+
+  if (/\(@[a-z0-9_-]+\s+subagent\)/i.test(title)) {
+    return true;
+  }
+
+  if (/\b@[a-z0-9_-]+\b/i.test(title) && /\bsubagent\b/i.test(title)) {
+    return true;
+  }
+
+  return false;
+}
+
 function isIntermediateAnalysisMessage(value) {
   const text = normalizeText(value);
   if (!text) {
@@ -386,6 +403,13 @@ function isIntermediateAnalysisMessage(value) {
     /\[search-mode\]/i,
     /\[analyze-mode\]/i,
     /<analysis>/i,
+    /<results>/i,
+    /<files>/i,
+    /<answer>/i,
+    /^\s*goal\*{0,2}\b/im,
+    /^\s*definition of done\*{0,2}\b/im,
+    /^\s*plan\*{0,2}\b/im,
+    /@[a-z0-9_-]+\s+subagent/i,
     /launch multiple background agents/i,
     /do not edit files; rely on repository read\/search only/i
   ];
@@ -832,6 +856,10 @@ export default async function OpenCodeNotifierPlugin(input) {
 
     const terminationNotice = state.pendingTerminationNotice;
 
+    if (isSubagentSessionTitle(state.sessionTitle)) {
+      return;
+    }
+
     if (!state.waitingForInputReady && !terminationNotice) {
       return;
     }
@@ -900,6 +928,12 @@ export default async function OpenCodeNotifierPlugin(input) {
 
       if (shouldApplySessionTitle(state.sessionTitle, sessionTitle)) {
         state.sessionTitle = sessionTitle;
+      }
+
+      if (isSubagentSessionTitle(state.sessionTitle)) {
+        state.waitingForInputReady = false;
+        state.pendingTerminationNotice = null;
+        return;
       }
 
       if (event.type === "message.updated") {

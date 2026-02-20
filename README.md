@@ -26,6 +26,40 @@ OpenCode 출력 로그를 감시해서,
 
 ## 설치
 
+### 자동 설치 (권장)
+
+아래 스크립트 한 번이면 다음을 자동으로 진행합니다.
+
+- node/npm 존재 확인 (없으면 설치 시도)
+- `npm install`
+- `npm run plugin:install` (OpenCode `plugin` 배열에 repo 플러그인 등록)
+
+Windows (PowerShell):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap-opencode.ps1
+```
+
+macOS/Linux:
+
+```bash
+bash ./scripts/bootstrap-opencode.sh
+```
+
+Discord 토큰/채널까지 바로 설정하려면 setup까지 같이 실행하세요.
+
+Windows:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap-opencode.ps1 -RunSetup
+```
+
+macOS/Linux:
+
+```bash
+bash ./scripts/bootstrap-opencode.sh --run-setup
+```
+
 ```bash
 git clone https://github.com/Superl3/OpenCode-Discord-Notifier.git
 cd OpenCode-Discord-Notifier
@@ -292,8 +326,8 @@ https://discord.com/api/oauth2/authorize?client_id=YOUR_CLIENT_ID&scope=bot&perm
   - 플러그인 모드는 `session.status: idle` / `session.idle` 이벤트를 직접 받아 트리거합니다.
 - 응답 생성 중 취소/중단했다면:
   - 마지막 assistant 본문 대신 `이번 응답은 사용자가 취소했습니다.` 또는 `이번 응답은 중단되었습니다.` 형태의 상태 알림이 전송됩니다.
-- `[search-mode]`, `[analyze-mode]`, `<analysis>` 같은 중간 분석 프롬프트가 알림으로 오면:
-  - 최신 플러그인은 해당 패턴을 자동으로 제외하고, 실제 assistant 응답만 알림으로 보냅니다.
+- `[search-mode]`, `[analyze-mode]`, `<analysis>`, `(@oracle subagent)` 같은 중간 분석/서브에이전트 응답이 알림으로 오면:
+  - 최신 플러그인은 해당 패턴과 `@... subagent` 세션을 자동으로 제외하고, 실제 assistant 응답만 알림으로 보냅니다.
   - 반영이 안 되면 `git pull` 후 `npm run plugin:install`을 다시 실행하고 IDE를 재시작하세요.
 - 실행할 때 `현재 실행 환경 레이블이 등록되지 않았습니다`가 보이면:
   - 해당 환경 키가 아직 `environment.labelsByKey`에 없습니다.

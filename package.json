@@ -6,7 +6,9 @@
   "scripts": {
     "start": "node src/opencode-notifier.js",
     "ui": "node src/ui-server.js",
-    "check": "node --check src/opencode-notifier.js && node --check src/ui-server.js && node --check opencode-plugin/opencode-notifier-plugin.js && node --check scripts/install-opencode-plugin.js && node --check scripts/uninstall-opencode-plugin.js && node --check scripts/setup-interactive.js",
+    "check": "node --check src/opencode-notifier.js && node --check src/ui-server.js && node --check opencode-plugin/opencode-notifier-plugin.js && node --check scripts/install-opencode-plugin.js && node --check scripts/uninstall-opencode-plugin.js && node --check scripts/setup-interactive.js && node --check scripts/bootstrap-opencode.js",
+    "bootstrap": "node scripts/bootstrap-opencode.js",
+    "bootstrap:setup": "node scripts/bootstrap-opencode.js --run-setup",
     "setup": "node scripts/setup-interactive.js",
     "postinstall": "node scripts/setup-interactive.js --postinstall",
     "plugin:install": "node scripts/install-opencode-plugin.js",
