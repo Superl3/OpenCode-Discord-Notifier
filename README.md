@@ -80,6 +80,7 @@ npm run setup
 `npm run setup`은 인터랙티브 모드로 아래를 순서대로 물어봅니다.
 
 - 디스코드 봇 토큰
+- (기존 설정에 토큰이 있으면) 기존 토큰 재사용 여부
 - 채널 ID 또는 DM 유저 ID
 - (선택) 멘션 유저 ID
 - 현재 실행 환경 레이블 (예: `집-PC`, `회사-노트북`, `WSL-main`)
@@ -327,7 +328,7 @@ https://discord.com/api/oauth2/authorize?client_id=YOUR_CLIENT_ID&scope=bot&perm
 - 응답 생성 중 취소/중단했다면:
   - 마지막 assistant 본문 대신 `이번 응답은 사용자가 취소했습니다.` 또는 `이번 응답은 중단되었습니다.` 형태의 상태 알림이 전송됩니다.
 - `[search-mode]`, `[analyze-mode]`, `<analysis>`, `(@oracle subagent)` 같은 중간 분석/서브에이전트 응답이 알림으로 오면:
-  - 최신 플러그인은 해당 패턴과 `@... subagent` 세션을 자동으로 제외하고, 실제 assistant 응답만 알림으로 보냅니다.
+  - 최신 플러그인은 해당 패턴, `@... subagent` 세션, 그리고 `task/delegate_task` 도중 생성된 중간 메시지를 자동으로 제외하고 실제 assistant 응답만 알림으로 보냅니다.
   - 반영이 안 되면 `git pull` 후 `npm run plugin:install`을 다시 실행하고 IDE를 재시작하세요.
 - 실행할 때 `현재 실행 환경 레이블이 등록되지 않았습니다`가 보이면:
   - 해당 환경 키가 아직 `environment.labelsByKey`에 없습니다.

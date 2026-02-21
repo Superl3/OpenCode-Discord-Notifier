@@ -160,6 +160,34 @@ function isPlaceholder(value) {
   return !text || text.includes("PUT_YOUR") || text.includes("YOUR_") || text.includes("DISCORD_BOT_TOKEN");
 }
 
+function resolveConfiguredBotToken(config) {
+  const token = typeof config?.discord?.botToken === "string" ? config.discord.botToken.trim() : "";
+  if (token.length < 20 || isPlaceholder(token)) {
+    return "";
+  }
+  return token;
+}
+
+function resolveExistingBotToken(modeChoice, existingPluginConfig, existingCliConfig) {
+  const pluginToken = resolveConfiguredBotToken(existingPluginConfig);
+  const cliToken = resolveConfiguredBotToken(existingCliConfig);
+
+  if (modeChoice === "2") {
+    return cliToken || pluginToken;
+  }
+
+  return pluginToken || cliToken;
+}
+
+function maskSecret(value) {
+  const token = String(value ?? "");
+  if (token.length <= 10) {
+    return "**********";
+  }
+
+  return `${token.slice(0, 6)}...${token.slice(-4)}`;
+}
+
 function isValidSnowflake(value) {
   return /^\d{15,22}$/.test(value);
 }
@@ -333,12 +361,40 @@ async function main() {
       "1"
     );
 
-    token = await askRequired(
-      rl,
-      "디스코드 봇 토큰을 입력해 주세요: ",
-      (value) => value.length >= 20 && !isPlaceholder(value),
-      "유효한 봇 토큰을 입력해 주세요. (placeholder 값은 사용할 수 없습니다.)"
-    );
+    const existingBotToken = resolveExistingBotToken(modeChoice, existingPluginConfig, existingCliConfig);
+    if (existingBotToken) {
+      const tokenChoice = await askChoice(
+        rl,
+        [
+          "디스코드 봇 토큰을 선택해 주세요.",
+          `- 기존 토큰: ${maskSecret(existingBotToken)}`
+        ].join("\n"),
+        [
+          { key: "1", label: "기존 토큰 사용 (권장)" },
+          { key: "2", label: "새 토큰 입력" }
+        ],
+        "1"
+      );
+
+      if (tokenChoice === "1") {
+        token = existingBotToken;
+        process.stdout.write("기존 디스코드 봇 토큰을 재사용합니다.\n");
+      } else {
+        token = await askRequired(
+          rl,
+          "디스코드 봇 토큰을 입력해 주세요: ",
+          (value) => value.length >= 20 && !isPlaceholder(value),
+          "유효한 봇 토큰을 입력해 주세요. (placeholder 값은 사용할 수 없습니다.)"
+        );
+      }
+    } else {
+      token = await askRequired(
+        rl,
+        "디스코드 봇 토큰을 입력해 주세요: ",
+        (value) => value.length >= 20 && !isPlaceholder(value),
+        "유효한 봇 토큰을 입력해 주세요. (placeholder 값은 사용할 수 없습니다.)"
+      );
+    }
 
     const targetChoice = await askChoice(
       rl,

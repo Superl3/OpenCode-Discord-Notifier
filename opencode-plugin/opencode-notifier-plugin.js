@@ -393,6 +393,28 @@ function isSubagentSessionTitle(value) {
   return false;
 }
 
+function isSubagentSessionState(state) {
+  if (state?.isChildSession) {
+    return true;
+  }
+
+  return isSubagentSessionTitle(state?.sessionTitle);
+}
+
+function isDelegationToolName(value) {
+  const tool = String(value ?? "").trim().toLowerCase();
+  if (!tool) {
+    return false;
+  }
+
+  return (
+    tool === "task"
+    || tool === "delegate_task"
+    || tool === "call_omo_agent"
+    || tool === "background_task"
+  );
+}
+
 function isIntermediateAnalysisMessage(value) {
   const text = normalizeText(value);
   if (!text) {
@@ -738,9 +760,11 @@ function createSessionState(sessionID, workspaceName) {
   return {
     sessionID,
     workspaceName,
+    isChildSession: false,
     sessionTitle: "",
     assistantMessageIds: new Set(),
     mutedAssistantMessageIds: new Set(),
+    delegationMessageIds: new Set(),
     textByMessageId: new Map(),
     lastAssistantMessageId: null,
     lastAssistantText: "",
@@ -856,7 +880,7 @@ export default async function OpenCodeNotifierPlugin(input) {
 
     const terminationNotice = state.pendingTerminationNotice;
 
-    if (isSubagentSessionTitle(state.sessionTitle)) {
+    if (isSubagentSessionState(state)) {
       return;
     }
 
@@ -881,6 +905,14 @@ export default async function OpenCodeNotifierPlugin(input) {
       !terminationNotice &&
       state.lastAssistantMessageId &&
       state.lastAssistantMessageId === state.lastNotifiedMessageId
+    ) {
+      return;
+    }
+
+    if (
+      !terminationNotice &&
+      state.lastAssistantMessageId &&
+      state.delegationMessageIds.has(state.lastAssistantMessageId)
     ) {
       return;
     }
@@ -930,7 +962,15 @@ export default async function OpenCodeNotifierPlugin(input) {
         state.sessionTitle = sessionTitle;
       }
 
-      if (isSubagentSessionTitle(state.sessionTitle)) {
+      if (
+        (event.type === "session.created" || event.type === "session.updated")
+        && typeof props.info?.parentID === "string"
+        && props.info.parentID.trim()
+      ) {
+        state.isChildSession = true;
+      }
+
+      if (isSubagentSessionState(state)) {
         state.waitingForInputReady = false;
         state.pendingTerminationNotice = null;
         return;
@@ -940,6 +980,10 @@ export default async function OpenCodeNotifierPlugin(input) {
         const info = props.info;
         if (info?.role === "assistant" && typeof info.id === "string") {
           const now = Date.now();
+
+          if (typeof info.agent === "string" && /-junior\b/i.test(info.agent)) {
+            state.isChildSession = true;
+          }
 
           state.assistantMessageIds.add(info.id);
           state.waitingForInputReady = false;
@@ -960,7 +1004,10 @@ export default async function OpenCodeNotifierPlugin(input) {
             state.lastAssistantMessageId = info.id;
             state.lastAssistantText = cachedText;
             state.lastAssistantUpdatedAt = now;
-            state.waitingForInputReady = info.id !== state.lastNotifiedMessageId;
+            state.waitingForInputReady = (
+              info.id !== state.lastNotifiedMessageId
+              && !state.delegationMessageIds.has(info.id)
+            );
           }
         }
         return;
@@ -968,6 +1015,16 @@ export default async function OpenCodeNotifierPlugin(input) {
 
       if (event.type === "message.part.updated") {
         const part = props.part;
+        if (part?.type === "tool" && typeof part.messageID === "string") {
+          if (isDelegationToolName(part.tool)) {
+            state.delegationMessageIds.add(part.messageID);
+            if (state.lastAssistantMessageId === part.messageID) {
+              state.waitingForInputReady = false;
+            }
+          }
+          return;
+        }
+
         if (part?.type !== "text" || typeof part.messageID !== "string") {
           return;
         }
@@ -995,7 +1052,10 @@ export default async function OpenCodeNotifierPlugin(input) {
           state.lastAssistantMessageId = part.messageID;
           state.lastAssistantText = nextText;
           state.lastAssistantUpdatedAt = now;
-          state.waitingForInputReady = part.messageID !== state.lastNotifiedMessageId;
+          state.waitingForInputReady = (
+            part.messageID !== state.lastNotifiedMessageId
+            && !state.delegationMessageIds.has(part.messageID)
+          );
           state.pendingTerminationNotice = null;
         }
         return;
