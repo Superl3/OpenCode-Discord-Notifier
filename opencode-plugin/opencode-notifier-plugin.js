@@ -458,6 +458,118 @@ function isIntermediateAnalysisMessage(value) {
   return markerHits >= 2;
 }
 
+function pickNormalizedString(candidates, maxChars = 120) {
+  for (const candidate of candidates) {
+    if (typeof candidate !== "string") {
+      continue;
+    }
+
+    const normalized = normalizeSingleLine(candidate, maxChars);
+    if (normalized) {
+      return normalized;
+    }
+  }
+
+  return "";
+}
+
+function isLikelyUserInterruptPrompt(value) {
+  const text = String(value ?? "").toLowerCase();
+  if (!text) {
+    return false;
+  }
+
+  const positivePattern = /(input|required|enter|token|api[\s_-]?key|choose|choice|select|confirm|permission|approve|approval|respond|reply|prompt|question|manual|승인|선택|입력|토큰|권한|확인|응답|인증)/;
+  const negativePattern = /(rate limit|quota|429|network|timeout|timed out|connection|econn|dns|service unavailable|backoff|일시|네트워크|타임아웃|연결|한도)/;
+  return positivePattern.test(text) && !negativePattern.test(text);
+}
+
+function extractInterruptNotice(event) {
+  const props = event?.properties ?? {};
+  const eventType = normalizeSingleLine(event?.type, 120);
+  const eventTypeLower = eventType.toLowerCase();
+
+  if (!eventTypeLower) {
+    return null;
+  }
+
+  if (eventTypeLower === "permission.asked" || eventTypeLower === "permission.requested") {
+    const permissionName = pickNormalizedString(
+      [
+        props.permission,
+        props.request?.permission,
+        props.permission?.name,
+        props.permission?.permission,
+        props.permission?.type
+      ],
+      80
+    );
+    const permissionPattern = pickNormalizedString(
+      [
+        props.pattern,
+        props.permission?.pattern,
+        props.request?.pattern
+      ],
+      120
+    );
+
+    const detail = [permissionName, permissionPattern].filter(Boolean).join(" | ");
+
+    return {
+      kind: "permission_required",
+      eventType,
+      detail
+    };
+  }
+
+  if (eventTypeLower === "session.status" && props.status?.type === "retry") {
+    const statusMessage = pickNormalizedString(
+      [
+        props.status?.message,
+        props.status?.reason
+      ],
+      180
+    );
+
+    if (isLikelyUserInterruptPrompt(statusMessage)) {
+      return {
+        kind: "input_required",
+        eventType,
+        detail: statusMessage
+      };
+    }
+  }
+
+  const explicitInterruptEvent = (
+    eventTypeLower.includes("input.required")
+    || eventTypeLower.includes("input.requested")
+    || eventTypeLower.includes("interrupt.required")
+    || eventTypeLower.includes("question.required")
+  );
+
+  if (!explicitInterruptEvent) {
+    return null;
+  }
+
+  const detail = pickNormalizedString(
+    [
+      props.prompt?.message,
+      props.prompt?.reason,
+      props.interrupt?.message,
+      props.interrupt?.reason,
+      props.reason,
+      props.status?.message
+    ],
+    180
+  );
+
+  return {
+    kind: "input_required",
+    eventType,
+    detail
+  };
+}
+
 function classifyTerminationKind(value) {
   const token = String(value ?? "").toLowerCase();
   if (!token) {
@@ -529,6 +641,30 @@ function buildTerminationBody(notice) {
   }
 
   return `${headline}\n- 상태: ${notice.detail}`;
+}
+
+function buildInterruptBody(notice, state) {
+  const kindLabel = notice.kind === "permission_required"
+    ? "권한/선택 확인 필요"
+    : "사용자 입력 필요";
+  const scopeLabel = isSubagentSessionState(state) ? "sub-agent" : "main-agent";
+
+  const lines = [
+    "🚨 **INTERRUPT NOTICE**",
+    `- 상태: ${kindLabel}`,
+    `- 범위: ${scopeLabel}`,
+    "- 에이전트가 사용자 응답(선택/토큰 입력/승인)을 기다리는 중입니다."
+  ];
+
+  if (notice.eventType) {
+    lines.push(`- 이벤트: ${notice.eventType}`);
+  }
+
+  if (notice.detail) {
+    lines.push(`- 상세: ${notice.detail}`);
+  }
+
+  return lines.join("\n");
 }
 
 function buildTextDedupeKey(value) {
@@ -659,6 +795,7 @@ async function resolveConfig(directory, worktree) {
 
 function buildMessageBody(config, state, triggerKind, options = {}) {
   const terminationNotice = options.terminationNotice ?? null;
+  const interruptNotice = options.interruptNotice ?? null;
   const measuredAt = Number.isFinite(options.measuredAt) ? options.measuredAt : Date.now();
   const elapsedMs = Number.isFinite(options.elapsedMs) && options.elapsedMs >= 0 ? options.elapsedMs : null;
   const normalized = normalizeText(state.lastAssistantText);
@@ -666,7 +803,9 @@ function buildMessageBody(config, state, triggerKind, options = {}) {
   const headerTitle = buildHeaderTitle(config, state);
 
   let body = "";
-  if (terminationNotice) {
+  if (interruptNotice) {
+    body = buildInterruptBody(interruptNotice, state);
+  } else if (terminationNotice) {
     body = buildTerminationBody(terminationNotice);
   } else {
     body = normalized;
@@ -703,7 +842,7 @@ function buildMessageBody(config, state, triggerKind, options = {}) {
 
   sections.push(body);
 
-  if (!terminationNotice && config.message.includeRawInCodeBlock && config.message.mode !== "raw") {
+  if (!terminationNotice && !interruptNotice && config.message.includeRawInCodeBlock && config.message.mode !== "raw") {
     sections.push("**원문**");
     sections.push(`\`\`\`text\n${truncateText(normalized || "(비어 있음)", 700)}\n\`\`\``);
   }
@@ -774,7 +913,8 @@ function createSessionState(sessionID, workspaceName) {
     responseStartedAt: 0,
     lastAssistantUpdatedAt: 0,
     waitingForInputReady: false,
-    pendingTerminationNotice: null
+    pendingTerminationNotice: null,
+    pendingInterruptNotice: null
   };
 }
 
@@ -879,30 +1019,32 @@ export default async function OpenCodeNotifierPlugin(input) {
     }
 
     const terminationNotice = state.pendingTerminationNotice;
+    const interruptNotice = state.pendingInterruptNotice;
 
-    if (isSubagentSessionState(state)) {
+    if (isSubagentSessionState(state) && !interruptNotice) {
       return;
     }
 
-    if (!state.waitingForInputReady && !terminationNotice) {
+    if (!state.waitingForInputReady && !terminationNotice && !interruptNotice) {
       return;
     }
 
     const now = Date.now();
-    if (now - state.lastNotifiedAt < config.trigger.cooldownMs) {
+    if (!interruptNotice && now - state.lastNotifiedAt < config.trigger.cooldownMs) {
       return;
     }
 
-    if (!terminationNotice && config.trigger.requireAssistantMessage && !state.lastAssistantMessageId) {
+    if (!terminationNotice && !interruptNotice && config.trigger.requireAssistantMessage && !state.lastAssistantMessageId) {
       return;
     }
 
-    if (!terminationNotice && isIntermediateAnalysisMessage(state.lastAssistantText)) {
+    if (!terminationNotice && !interruptNotice && isIntermediateAnalysisMessage(state.lastAssistantText)) {
       return;
     }
 
     if (
       !terminationNotice &&
+      !interruptNotice &&
       state.lastAssistantMessageId &&
       state.lastAssistantMessageId === state.lastNotifiedMessageId
     ) {
@@ -911,13 +1053,16 @@ export default async function OpenCodeNotifierPlugin(input) {
 
     if (
       !terminationNotice &&
+      !interruptNotice &&
       state.lastAssistantMessageId &&
       state.delegationMessageIds.has(state.lastAssistantMessageId)
     ) {
       return;
     }
 
-    const currentTextKey = terminationNotice
+    const currentTextKey = interruptNotice
+      ? `interrupt:${interruptNotice.kind}:${interruptNotice.eventType || ""}:${interruptNotice.detail || ""}`
+      : terminationNotice
       ? `termination:${terminationNotice.kind}:${terminationNotice.detail || ""}`
       : buildTextDedupeKey(state.lastAssistantText);
 
@@ -934,6 +1079,7 @@ export default async function OpenCodeNotifierPlugin(input) {
 
     const content = buildMessageBody(config, state, triggerKind, {
       terminationNotice,
+      interruptNotice,
       measuredAt: now,
       elapsedMs
     });
@@ -945,6 +1091,7 @@ export default async function OpenCodeNotifierPlugin(input) {
     state.lastAssistantUpdatedAt = 0;
     state.waitingForInputReady = false;
     state.pendingTerminationNotice = null;
+    state.pendingInterruptNotice = null;
   }
 
   return {
@@ -962,6 +1109,19 @@ export default async function OpenCodeNotifierPlugin(input) {
         state.sessionTitle = sessionTitle;
       }
 
+      const interruptNotice = extractInterruptNotice(event);
+      if (interruptNotice) {
+        state.pendingInterruptNotice = interruptNotice;
+        state.waitingForInputReady = true;
+
+        try {
+          await notifyIfReady(state, `interrupt: ${interruptNotice.kind}`);
+        } catch (error) {
+          process.stderr.write(`[opencode-notifier-plugin] ${error instanceof Error ? error.message : String(error)}\n`);
+        }
+        return;
+      }
+
       if (
         (event.type === "session.created" || event.type === "session.updated")
         && typeof props.info?.parentID === "string"
@@ -973,6 +1133,7 @@ export default async function OpenCodeNotifierPlugin(input) {
       if (isSubagentSessionState(state)) {
         state.waitingForInputReady = false;
         state.pendingTerminationNotice = null;
+        state.pendingInterruptNotice = null;
         return;
       }
 
@@ -988,6 +1149,7 @@ export default async function OpenCodeNotifierPlugin(input) {
           state.assistantMessageIds.add(info.id);
           state.waitingForInputReady = false;
           state.pendingTerminationNotice = null;
+          state.pendingInterruptNotice = null;
 
           if (!state.responseStartedAt) {
             state.responseStartedAt = now;
@@ -1057,6 +1219,7 @@ export default async function OpenCodeNotifierPlugin(input) {
             && !state.delegationMessageIds.has(part.messageID)
           );
           state.pendingTerminationNotice = null;
+          state.pendingInterruptNotice = null;
         }
         return;
       }
@@ -1067,6 +1230,7 @@ export default async function OpenCodeNotifierPlugin(input) {
         const terminationNotice = extractTerminationNotice(event);
         if (terminationNotice) {
           state.pendingTerminationNotice = terminationNotice;
+          state.pendingInterruptNotice = null;
           state.waitingForInputReady = true;
 
           try {
@@ -1081,6 +1245,7 @@ export default async function OpenCodeNotifierPlugin(input) {
           state.responseStartedAt = Date.now();
           state.waitingForInputReady = state.lastAssistantMessageId !== state.lastNotifiedMessageId;
           state.pendingTerminationNotice = null;
+          state.pendingInterruptNotice = null;
           return;
         }
 
@@ -1097,6 +1262,7 @@ export default async function OpenCodeNotifierPlugin(input) {
       const terminationNotice = extractTerminationNotice(event);
       if (terminationNotice) {
         state.pendingTerminationNotice = terminationNotice;
+        state.pendingInterruptNotice = null;
         state.waitingForInputReady = true;
 
         try {

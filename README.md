@@ -196,11 +196,12 @@ npm run start -- --dry-run --config ./opencode-notifier.config.json -- opencode
 
 ## OpenCode IDE 플러그인 모드 (권장)
 
-CLI 래퍼 대신 OpenCode 플러그인으로 붙이면, 사용자가 원하는 3가지가 더 정확하게 동작합니다.
+CLI 래퍼 대신 OpenCode 플러그인으로 붙이면, 사용자가 원하는 4가지가 더 정확하게 동작합니다.
 
 - assistant 응답이 끝난 뒤 내용을 기준으로 알림 생성
 - 실제 입력 가능 상태(`session.status: idle`, `session.idle`) 시점에 알림 전송
 - OpenCode 플러그인 목록(`opencode.json`의 `plugin` 배열)에서 항목으로 로드
+- 선택지/토큰 입력/권한 승인 같은 사용자 interrupt 대기 상태를 `INTERRUPT NOTICE` 형식으로 즉시 알림
 
 ### 설치
 
@@ -272,6 +273,8 @@ npm run plugin:uninstall
   - 같은 메시지가 연속 idle 이벤트에서 중복 발송되는 것을 막는 보호 시간(ms)
 - `trigger.requireAssistantMessage`
   - assistant 메시지가 없는 idle 이벤트는 무시
+- `INTERRUPT NOTICE` (고정 동작)
+  - `permission.asked`/입력 요구 이벤트가 오면 서브에이전트 포함 모든 agent에 대해 별도 notice 포맷으로 즉시 알림
 
 ## 디스코드 봇 권한/초대 설정
 
@@ -328,7 +331,8 @@ https://discord.com/api/oauth2/authorize?client_id=YOUR_CLIENT_ID&scope=bot&perm
 - 응답 생성 중 취소/중단했다면:
   - 마지막 assistant 본문 대신 `이번 응답은 사용자가 취소했습니다.` 또는 `이번 응답은 중단되었습니다.` 형태의 상태 알림이 전송됩니다.
 - `[search-mode]`, `[analyze-mode]`, `<analysis>`, `(@oracle subagent)` 같은 중간 분석/서브에이전트 응답이 알림으로 오면:
-  - 최신 플러그인은 해당 패턴, `@... subagent` 세션, 그리고 `task/delegate_task` 도중 생성된 중간 메시지를 자동으로 제외하고 실제 assistant 응답만 알림으로 보냅니다.
+  - 최신 플러그인은 완료/요약 알림에서는 해당 패턴, `@... subagent` 세션, 그리고 `task/delegate_task` 도중 생성된 중간 메시지를 자동으로 제외합니다.
+  - 대신 사용자 응답이 필요한 interrupt 대기 상태(선택/토큰/권한)는 `INTERRUPT NOTICE`로 서브에이전트 포함 즉시 알립니다.
   - 반영이 안 되면 `git pull` 후 `npm run plugin:install`을 다시 실행하고 IDE를 재시작하세요.
 - 실행할 때 `현재 실행 환경 레이블이 등록되지 않았습니다`가 보이면:
   - 해당 환경 키가 아직 `environment.labelsByKey`에 없습니다.
