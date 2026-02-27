@@ -3,6 +3,9 @@ import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 
 const DISCORD_CONTENT_LIMIT = 2000;
+const DISCORD_PUBLIC_THREAD_TYPE = 11;
+const DISCORD_THREAD_NAME_LIMIT = 100;
+const DISCORD_THREAD_AUTO_ARCHIVE_MINUTES = new Set([60, 1440, 4320, 10080]);
 
 function stripAnsi(value) {
   return String(value ?? "").replace(/\u001b\[[0-9;]*m/g, "");
@@ -121,7 +124,9 @@ function buildDefaultConfig() {
       botToken: "",
       targets: [],
       mentionUserId: null,
-      timeoutMs: 10000
+      timeoutMs: 10000,
+      sessionThreadsEnabled: true,
+      sessionThreadAutoArchiveMinutes: 1440
     },
     environment: {
       labelsByKey: {}
@@ -181,6 +186,15 @@ function hasUsableDiscordConfig(config) {
   }
 
   return config.discord.targets.every((target) => !isPlaceholder(target.id));
+}
+
+function normalizeSessionThreadAutoArchiveMinutes(value) {
+  const normalized = Number.isFinite(value) ? Math.round(value) : 1440;
+  if (DISCORD_THREAD_AUTO_ARCHIVE_MINUTES.has(normalized)) {
+    return normalized;
+  }
+
+  return 1440;
 }
 
 function normalizeSingleLine(value, maxChars = 120) {
@@ -709,7 +723,11 @@ function normalizeRuntimeConfig(raw) {
       mentionUserId: typeof merged.discord?.mentionUserId === "string"
         ? merged.discord.mentionUserId
         : null,
-      timeoutMs: Number.isFinite(merged.discord?.timeoutMs) ? merged.discord.timeoutMs : 10000
+      timeoutMs: Number.isFinite(merged.discord?.timeoutMs) ? merged.discord.timeoutMs : 10000,
+      sessionThreadsEnabled: merged.discord?.sessionThreadsEnabled !== false,
+      sessionThreadAutoArchiveMinutes: normalizeSessionThreadAutoArchiveMinutes(
+        merged.discord?.sessionThreadAutoArchiveMinutes
+      )
     },
     environment
   };
@@ -741,6 +759,31 @@ function buildHeaderTitle(config, state) {
     : `[${environmentLabel}]`;
 
   return `${decoratedTitle} | ${sessionHeader}`;
+}
+
+function buildSessionThreadCacheKey(parentChannelId, sessionID) {
+  return `${parentChannelId}::${sessionID}`;
+}
+
+function buildSessionThreadName(state) {
+  const workspace = normalizeSingleLine(state.workspaceName, 42) || "OpenCode";
+  const sessionLabel = normalizeSingleLine(state.sessionTitle || state.sessionID, 54) || state.sessionID;
+  return truncateText(`${workspace} | ${sessionLabel}`, DISCORD_THREAD_NAME_LIMIT);
+}
+
+function canUseSessionThreadForTarget(config, target) {
+  return config.discord.sessionThreadsEnabled && target?.type === "channel";
+}
+
+function shouldDisableThreadOnError(error) {
+  const text = String(error instanceof Error ? error.message : error).toLowerCase();
+  return (
+    text.includes("(400)")
+    || text.includes("(403)")
+    || text.includes("missing access")
+    || text.includes("missing permissions")
+    || text.includes("invalid form body")
+  );
 }
 
 async function resolveConfig(directory, worktree) {
@@ -951,6 +994,8 @@ export default async function OpenCodeNotifierPlugin(input) {
   const workspaceName = resolveWorkspaceName(input.directory, input.worktree);
   const stateBySession = new Map();
   const dmChannelCache = new Map();
+  const sessionThreadChannelCache = new Map();
+  const threadDisabledParentChannels = new Set();
 
   if (config.environment.requiresSetup) {
     process.stderr.write(
@@ -969,9 +1014,53 @@ export default async function OpenCodeNotifierPlugin(input) {
     return stateBySession.get(sessionID);
   }
 
-  async function resolveChannelForTarget(target) {
+  async function createSessionThread(parentChannelId, state) {
+    const thread = await discordRequest(config, `/channels/${parentChannelId}/threads`, "POST", {
+      name: buildSessionThreadName(state),
+      auto_archive_duration: config.discord.sessionThreadAutoArchiveMinutes,
+      type: DISCORD_PUBLIC_THREAD_TYPE
+    });
+
+    if (!thread || typeof thread.id !== "string") {
+      throw new Error(`Failed to create thread for channel ${parentChannelId}`);
+    }
+
+    return thread.id;
+  }
+
+  async function resolveChannelForTarget(target, state, options = {}) {
     if (target.type === "channel") {
-      return target.id;
+      if (!canUseSessionThreadForTarget(config, target) || !state?.sessionID) {
+        return target.id;
+      }
+
+      const cacheKey = buildSessionThreadCacheKey(target.id, state.sessionID);
+      if (options.forceRefreshThread) {
+        sessionThreadChannelCache.delete(cacheKey);
+      }
+
+      if (!options.forceRefreshThread && sessionThreadChannelCache.has(cacheKey)) {
+        return sessionThreadChannelCache.get(cacheKey);
+      }
+
+      if (threadDisabledParentChannels.has(target.id) && !options.forceRefreshThread) {
+        return target.id;
+      }
+
+      try {
+        const threadChannelId = await createSessionThread(target.id, state);
+        sessionThreadChannelCache.set(cacheKey, threadChannelId);
+        return threadChannelId;
+      } catch (error) {
+        if (shouldDisableThreadOnError(error)) {
+          threadDisabledParentChannels.add(target.id);
+        }
+
+        process.stderr.write(
+          `[opencode-notifier-plugin] 세션 스레드 생성에 실패해 기본 채널로 전송합니다: ${error instanceof Error ? error.message : String(error)}\n`
+        );
+        return target.id;
+      }
     }
 
     if (target.type !== "user") {
@@ -994,7 +1083,7 @@ export default async function OpenCodeNotifierPlugin(input) {
     return channel.id;
   }
 
-  async function sendNotification(content) {
+  async function sendNotification(content, state) {
     const payload = {
       content: truncateText(content, DISCORD_CONTENT_LIMIT),
       allowed_mentions: {
@@ -1004,8 +1093,32 @@ export default async function OpenCodeNotifierPlugin(input) {
     };
 
     for (const target of config.discord.targets) {
-      const channelId = await resolveChannelForTarget(target);
-      await discordRequest(config, `/channels/${channelId}/messages`, "POST", payload);
+      const useSessionThread = canUseSessionThreadForTarget(config, target);
+      let firstError = null;
+
+      for (let attempt = 0; attempt < (useSessionThread ? 2 : 1); attempt += 1) {
+        const channelId = await resolveChannelForTarget(target, state, {
+          forceRefreshThread: useSessionThread && attempt > 0
+        });
+
+        try {
+          await discordRequest(config, `/channels/${channelId}/messages`, "POST", payload);
+          firstError = null;
+          break;
+        } catch (error) {
+          if (!firstError) {
+            firstError = error;
+          }
+
+          if (!useSessionThread || attempt > 0) {
+            throw error;
+          }
+        }
+      }
+
+      if (firstError) {
+        throw firstError;
+      }
     }
   }
 
@@ -1083,7 +1196,7 @@ export default async function OpenCodeNotifierPlugin(input) {
       measuredAt: now,
       elapsedMs
     });
-    await sendNotification(content);
+    await sendNotification(content, state);
     state.lastNotifiedAt = now;
     state.lastNotifiedMessageId = state.lastAssistantMessageId;
     state.lastNotifiedTextKey = currentTextKey;

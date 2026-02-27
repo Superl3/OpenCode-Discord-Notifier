@@ -59,7 +59,9 @@
       }
     ],
     "mentionUserId": null,
-    "timeoutMs": 10000
+    "timeoutMs": 10000,
+    "sessionThreadsEnabled": true,
+    "sessionThreadAutoArchiveMinutes": 1440
   },
   "environment": {
     "labelsByKey": {}

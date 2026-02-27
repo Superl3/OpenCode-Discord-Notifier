@@ -196,12 +196,13 @@ npm run start -- --dry-run --config ./opencode-notifier.config.json -- opencode
 
 ## OpenCode IDE 플러그인 모드 (권장)
 
-CLI 래퍼 대신 OpenCode 플러그인으로 붙이면, 사용자가 원하는 4가지가 더 정확하게 동작합니다.
+CLI 래퍼 대신 OpenCode 플러그인으로 붙이면, 사용자가 원하는 5가지가 더 정확하게 동작합니다.
 
 - assistant 응답이 끝난 뒤 내용을 기준으로 알림 생성
 - 실제 입력 가능 상태(`session.status: idle`, `session.idle`) 시점에 알림 전송
 - OpenCode 플러그인 목록(`opencode.json`의 `plugin` 배열)에서 항목으로 로드
 - 선택지/토큰 입력/권한 승인 같은 사용자 interrupt 대기 상태를 `INTERRUPT NOTICE` 형식으로 즉시 알림
+- 채널 타겟에서는 세션별 Discord 스레드를 자동 생성/재사용해 같은 세션 알림을 한 스레드에 누적
 
 ### 설치
 
@@ -275,6 +276,10 @@ npm run plugin:uninstall
   - assistant 메시지가 없는 idle 이벤트는 무시
 - `INTERRUPT NOTICE` (고정 동작)
   - `permission.asked`/입력 요구 이벤트가 오면 서브에이전트 포함 모든 agent에 대해 별도 notice 포맷으로 즉시 알림
+- `discord.sessionThreadsEnabled`
+  - `true`면 채널 타겟에서 세션별 스레드를 만들어 같은 세션 업데이트를 같은 스레드로 누적 (기본값 `true`)
+- `discord.sessionThreadAutoArchiveMinutes`
+  - 생성 스레드의 자동 보관 시간(분). `60 | 1440 | 4320 | 10080` 중 하나, 기본값 `1440`
 
 ## 디스코드 봇 권한/초대 설정
 
@@ -282,6 +287,8 @@ npm run plugin:uninstall
 
 - `View Channels`
 - `Send Messages`
+- `Send Messages in Threads`
+- `Create Public Threads`
 
 ### 권한 URL (예시)
 
@@ -291,11 +298,13 @@ npm run plugin:uninstall
 https://discord.com/api/oauth2/authorize?client_id=YOUR_CLIENT_ID&scope=bot&permissions=3072
 ```
 
-`3072`는 `View Channels(1024)` + `Send Messages(2048)` 조합입니다.
+`3072`는 기본 조합(`View Channels(1024)` + `Send Messages(2048)`) 예시입니다.
+세션 스레드 모드를 쓰면 여기에 `Send Messages in Threads`, `Create Public Threads` 권한을 추가로 부여하세요.
 
 ### 전송 조건
 
 - 채널 전송: 봇이 해당 서버/채널에 초대되어 있고 메시지 권한이 있어야 합니다.
+- 세션 스레드 사용 시: 위 권한에 더해 스레드 생성/전송 권한이 있어야 하며, 없으면 기본 채널 전송으로 자동 폴백됩니다.
 - DM 전송: 봇이 대상 유저와 DM을 열 수 있어야 합니다.
 - 채널 ID만 넣고 DM을 비워 둬도 정상 동작합니다.
 
