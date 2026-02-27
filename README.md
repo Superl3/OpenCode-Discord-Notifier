@@ -196,7 +196,7 @@ npm run start -- --dry-run --config ./opencode-notifier.config.json -- opencode
 
 ## OpenCode IDE 플러그인 모드 (권장)
 
-CLI 래퍼 대신 OpenCode 플러그인으로 붙이면, 사용자가 원하는 6가지가 더 정확하게 동작합니다.
+CLI 래퍼 대신 OpenCode 플러그인으로 붙이면, 사용자가 원하는 7가지가 더 정확하게 동작합니다.
 
 - assistant 응답이 끝난 뒤 내용을 기준으로 알림 생성
 - 실제 입력 가능 상태(`session.status: idle`, `session.idle`) 시점에 알림 전송
@@ -204,6 +204,7 @@ CLI 래퍼 대신 OpenCode 플러그인으로 붙이면, 사용자가 원하는 
 - 선택지/토큰 입력/권한 승인 같은 사용자 interrupt 대기 상태를 `INTERRUPT NOTICE` 형식으로 즉시 알림
 - 채널 타겟에서는 세션별 Discord 스레드를 자동 생성/재사용해 같은 세션 알림을 한 스레드에 누적
 - 프롬프트 입력 시 `🟡 작업 수행중...` 상태 메시지를 먼저 보내고, 완료 시 같은 메시지를 `✅ 처리 완료`로 업데이트해 요청-결과 매칭을 쉽게 확인
+- 스레드 라우팅 정보를 로컬에 저장해(OpenCode 재시작 후에도) 같은 작업/세션 스레드를 우선 재사용
 
 ### 설치
 
@@ -281,6 +282,8 @@ npm run plugin:uninstall
   - `true`면 채널 타겟에서 세션별 스레드를 만들어 같은 세션 업데이트를 같은 스레드로 누적 (기본값 `true`)
 - `discord.sessionThreadAutoArchiveMinutes`
   - 생성 스레드의 자동 보관 시간(분). `60 | 1440 | 4320 | 10080` 중 하나, 기본값 `1440`
+- 스레드 라우팅 저장소 (고정 동작)
+  - `~/.config/opencode/opencode-notifier-session-threads.json`에 채널+세션(및 비-generic 세션 제목) 기준 매핑을 저장해 재시작 후에도 기존 스레드를 우선 재사용
 - 상태 메시지 업데이트 (고정 동작)
   - 새 사용자 프롬프트가 들어오면 작업 상태 메시지를 먼저 전송하고, 하위 subtask 진행 상황을 이모지(`🔄/✅/❌`)로 갱신한 뒤 완료 시 동일 메시지를 완료 상태로 수정
 

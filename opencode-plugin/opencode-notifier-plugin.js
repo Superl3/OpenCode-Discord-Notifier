@@ -1,10 +1,13 @@
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 
 const DISCORD_CONTENT_LIMIT = 2000;
 const DISCORD_THREAD_NAME_LIMIT = 100;
 const DISCORD_THREAD_AUTO_ARCHIVE_MINUTES = new Set([60, 1440, 4320, 10080]);
+const THREAD_ROUTE_STORE_FILE = "opencode-notifier-session-threads.json";
+const THREAD_ROUTE_STORE_VERSION = 1;
+const THREAD_ROUTE_MAX_AGE_MS = 1000 * 60 * 60 * 24 * 21;
 
 function stripAnsi(value) {
   return String(value ?? "").replace(/\u001b\[[0-9;]*m/g, "");
@@ -900,6 +903,81 @@ function buildTargetKey(target) {
   return `${target.type}:${target.id}`;
 }
 
+function resolveThreadWorkspaceKey(state) {
+  return normalizeSingleLine(state?.workspaceName, 80).toLowerCase() || "workspace";
+}
+
+function resolveThreadTitleKey(state) {
+  const title = normalizeSingleLine(state?.sessionTitle, 160);
+  if (!title || isGenericSessionTitle(title)) {
+    return "";
+  }
+
+  return title.toLowerCase();
+}
+
+function buildThreadIdentityKeys(state) {
+  const keys = [];
+  const workspaceKey = resolveThreadWorkspaceKey(state);
+
+  const sessionID = normalizeSingleLine(state?.sessionID, 120);
+  if (sessionID) {
+    keys.push(`workspace:${workspaceKey}|session:${sessionID}`);
+  }
+
+  const titleKey = resolveThreadTitleKey(state);
+  if (titleKey) {
+    keys.push(`workspace:${workspaceKey}|title:${titleKey}`);
+  }
+
+  return keys;
+}
+
+function buildThreadRouteStoreKey(parentChannelId, identityKey) {
+  return `${parentChannelId}::${identityKey}`;
+}
+
+function createDefaultThreadRouteStore() {
+  return {
+    version: THREAD_ROUTE_STORE_VERSION,
+    routes: {}
+  };
+}
+
+function normalizeThreadRouteStore(raw) {
+  if (!isPlainObject(raw) || !isPlainObject(raw.routes)) {
+    return createDefaultThreadRouteStore();
+  }
+
+  const now = Date.now();
+  const routes = {};
+  for (const [key, value] of Object.entries(raw.routes)) {
+    if (typeof key !== "string" || !isPlainObject(value)) {
+      continue;
+    }
+
+    const threadId = normalizeSingleLine(value.threadId, 120);
+    if (!threadId) {
+      continue;
+    }
+
+    const updatedAt = Number.isFinite(value.updatedAt) ? value.updatedAt : now;
+    if (now - updatedAt > THREAD_ROUTE_MAX_AGE_MS) {
+      continue;
+    }
+
+    routes[key] = {
+      threadId,
+      updatedAt
+    };
+  }
+
+  return {
+    version: THREAD_ROUTE_STORE_VERSION,
+    routes
+  };
+}
+
 function canUseSessionThreadForTarget(config, target) {
   return config.discord.sessionThreadsEnabled && target?.type === "channel";
 }
@@ -1149,6 +1227,97 @@ export default async function OpenCodeNotifierPlugin(input) {
   const dmChannelCache = new Map();
   const sessionThreadChannelCache = new Map();
   const threadDisabledParentChannels = new Set();
+  const configDirs = resolveOpenCodeUserConfigDirs();
+  const threadRouteStoreDir = configDirs[0] || join(homedir(), ".config", "opencode");
+  const threadRouteStorePath = join(threadRouteStoreDir, THREAD_ROUTE_STORE_FILE);
+  let threadRouteStore = createDefaultThreadRouteStore();
+
+  try {
+    const loadedThreadRoutes = await readJsonIfExists(threadRouteStorePath);
+    threadRouteStore = normalizeThreadRouteStore(loadedThreadRoutes);
+  } catch {
+    threadRouteStore = createDefaultThreadRouteStore();
+  }
+
+  async function persistThreadRouteStore() {
+    threadRouteStore = normalizeThreadRouteStore(threadRouteStore);
+    await mkdir(threadRouteStoreDir, { recursive: true });
+    await writeFile(threadRouteStorePath, JSON.stringify(threadRouteStore, null, 2), "utf8");
+  }
+
+  function findStoredThreadChannelId(parentChannelId, state) {
+    for (const identityKey of buildThreadIdentityKeys(state)) {
+      const storeKey = buildThreadRouteStoreKey(parentChannelId, identityKey);
+      const entry = threadRouteStore.routes[storeKey];
+      if (entry && typeof entry.threadId === "string" && entry.threadId) {
+        return entry.threadId;
+      }
+    }
+
+    return "";
+  }
+
+  async function rememberThreadRoute(parentChannelId, state, threadChannelId) {
+    const identityKeys = buildThreadIdentityKeys(state);
+    if (identityKeys.length === 0) {
+      return;
+    }
+
+    const now = Date.now();
+    let changed = false;
+
+    for (const identityKey of identityKeys) {
+      const storeKey = buildThreadRouteStoreKey(parentChannelId, identityKey);
+      const current = threadRouteStore.routes[storeKey];
+      if (current?.threadId === threadChannelId) {
+        continue;
+      }
+
+      threadRouteStore.routes[storeKey] = {
+        threadId: threadChannelId,
+        updatedAt: now
+      };
+      changed = true;
+    }
+
+    if (changed) {
+      try {
+        await persistThreadRouteStore();
+      } catch (error) {
+        process.stderr.write(
+          `[opencode-notifier-plugin] 스레드 라우팅 정보를 저장하지 못했습니다: ${error instanceof Error ? error.message : String(error)}\n`
+        );
+      }
+    }
+  }
+
+  async function forgetThreadRoute(parentChannelId, state) {
+    const identityKeys = buildThreadIdentityKeys(state);
+    if (identityKeys.length === 0) {
+      return;
+    }
+
+    let changed = false;
+    for (const identityKey of identityKeys) {
+      const storeKey = buildThreadRouteStoreKey(parentChannelId, identityKey);
+      if (!Object.prototype.hasOwnProperty.call(threadRouteStore.routes, storeKey)) {
+        continue;
+      }
+
+      delete threadRouteStore.routes[storeKey];
+      changed = true;
+    }
+
+    if (changed) {
+      try {
+        await persistThreadRouteStore();
+      } catch (error) {
+        process.stderr.write(
+          `[opencode-notifier-plugin] 스레드 라우팅 정보를 정리하지 못했습니다: ${error instanceof Error ? error.message : String(error)}\n`
+        );
+      }
+    }
+  }
 
   if (config.environment.requiresSetup) {
     process.stderr.write(
@@ -1233,10 +1402,19 @@ export default async function OpenCodeNotifierPlugin(input) {
       const cacheKey = buildSessionThreadCacheKey(target.id, state.sessionID);
       if (options.forceRefreshThread) {
         sessionThreadChannelCache.delete(cacheKey);
+        await forgetThreadRoute(target.id, state);
       }
 
       if (!options.forceRefreshThread && sessionThreadChannelCache.has(cacheKey)) {
         return sessionThreadChannelCache.get(cacheKey);
+      }
+
+      if (!options.forceRefreshThread) {
+        const storedThreadChannelId = findStoredThreadChannelId(target.id, state);
+        if (storedThreadChannelId) {
+          sessionThreadChannelCache.set(cacheKey, storedThreadChannelId);
+          return storedThreadChannelId;
+        }
       }
 
       if (threadDisabledParentChannels.has(target.id) && !options.forceRefreshThread) {
@@ -1246,6 +1424,7 @@ export default async function OpenCodeNotifierPlugin(input) {
       try {
         const threadChannelId = await createSessionThread(target.id, state);
         sessionThreadChannelCache.set(cacheKey, threadChannelId);
+        await rememberThreadRoute(target.id, state, threadChannelId);
         return threadChannelId;
       } catch (error) {
         if (shouldDisableThreadOnError(error)) {
