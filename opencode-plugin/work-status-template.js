@@ -31,6 +31,16 @@ export function renderWorkStatusTemplate(input) {
     ]);
   }
 
+  if (phase === "failed") {
+    return buildLines([
+      "❌ **처리 실패**",
+      "",
+      `🔹 **수행한 작업**: ${subtaskSummary || "없음"}`,
+      elapsedLabel ? `⏱️ **소요 시간**: ${elapsedLabel}` : null,
+      detail ? `📝 **실패 원인**: ${detail}` : null
+    ]);
+  }
+
   if (phase === "completed" || phase === "cancelled") {
     const isCompleted = phase === "completed";
     return buildLines([

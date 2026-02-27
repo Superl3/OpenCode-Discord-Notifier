@@ -626,6 +626,10 @@ function classifyTerminationKind(value) {
     return "interrupted";
   }
 
+  if (/(fail|failed|failure|error|errored|exception|timeout|timed out|crash|crashed|panic|fatal|denied|rejected|실패|오류|예외|타임아웃|거부)/.test(token)) {
+    return "failed";
+  }
+
   return null;
 }
 
@@ -659,6 +663,8 @@ function extractTerminationNotice(event) {
 function buildTerminationBody(notice) {
   const headline = notice.kind === "cancelled"
     ? "- 이번 응답은 사용자가 취소했습니다."
+    : notice.kind === "failed"
+    ? "- 이번 응답은 실패했습니다."
     : "- 이번 응답은 중단되었습니다.";
 
   if (!notice.detail) {
@@ -677,7 +683,12 @@ function buildTerminationBody(notice) {
     normalizedDetail === "stop" ||
     normalizedDetail === "stopped" ||
     normalizedDetail === "terminate" ||
-    normalizedDetail === "terminated"
+    normalizedDetail === "terminated" ||
+    normalizedDetail === "fail" ||
+    normalizedDetail === "failed" ||
+    normalizedDetail === "failure" ||
+    normalizedDetail === "error" ||
+    normalizedDetail === "errored"
   ) {
     return headline;
   }
@@ -1662,7 +1673,9 @@ export default async function OpenCodeNotifierPlugin(input) {
           elapsedMs
         });
       } else if (state.currentRequestId) {
-        const phase = terminationNotice ? "cancelled" : "completed";
+        const phase = terminationNotice
+          ? (terminationNotice.kind === "failed" ? "failed" : "cancelled")
+          : "completed";
         await upsertProgressStatus(state, phase, {
           detail: terminationNotice?.detail || "",
           elapsedMs
