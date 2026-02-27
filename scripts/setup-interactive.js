@@ -179,6 +179,46 @@ function resolveExistingBotToken(modeChoice, existingPluginConfig, existingCliCo
   return pluginToken || cliToken;
 }
 
+function normalizeTargetType(value) {
+  const type = normalizeSingleLine(value, 20).toLowerCase();
+  if (type === "channel" || type === "user") {
+    return type;
+  }
+
+  return "";
+}
+
+function resolveConfiguredTarget(config) {
+  const targets = Array.isArray(config?.discord?.targets) ? config.discord.targets : [];
+
+  for (const target of targets) {
+    if (!isPlainObject(target)) {
+      continue;
+    }
+
+    const type = normalizeTargetType(target.type);
+    const id = typeof target.id === "string" ? target.id.trim() : "";
+    if (!type || !isValidSnowflake(id)) {
+      continue;
+    }
+
+    return { type, id };
+  }
+
+  return null;
+}
+
+function resolveExistingTarget(modeChoice, existingPluginConfig, existingCliConfig) {
+  const pluginTarget = resolveConfiguredTarget(existingPluginConfig);
+  const cliTarget = resolveConfiguredTarget(existingCliConfig);
+
+  if (modeChoice === "2") {
+    return cliTarget || pluginTarget;
+  }
+
+  return pluginTarget || cliTarget;
+}
+
 function maskSecret(value) {
   const token = String(value ?? "");
   if (token.length <= 10) {
@@ -240,6 +280,17 @@ async function askEnvironmentLabel(rl, fallbackLabel) {
 
     process.stdout.write("환경 레이블은 비어 있을 수 없습니다. 1~60자로 입력해 주세요.\n");
   }
+}
+
+async function askTargetId(rl, targetType) {
+  return askRequired(
+    rl,
+    targetType === "channel"
+      ? "디스코드 채널 ID를 입력해 주세요: "
+      : "DM 대상 유저 ID를 입력해 주세요: ",
+    isValidSnowflake,
+    "ID는 숫자로만 된 Discord snowflake(15~22자리)여야 합니다."
+  );
 }
 
 function applyDiscordFields(template, token, targetType, targetId, mentionUserId) {
@@ -407,14 +458,39 @@ async function main() {
     );
 
     targetType = targetChoice === "2" ? "user" : "channel";
-    targetId = await askRequired(
-      rl,
-      targetType === "channel"
-        ? "디스코드 채널 ID를 입력해 주세요: "
-        : "DM 대상 유저 ID를 입력해 주세요: ",
-      isValidSnowflake,
-      "ID는 숫자로만 된 Discord snowflake(15~22자리)여야 합니다."
-    );
+
+    const existingTarget = resolveExistingTarget(modeChoice, existingPluginConfig, existingCliConfig);
+    const reusableTargetId = existingTarget?.type === targetType ? existingTarget.id : "";
+
+    if (reusableTargetId) {
+      const targetIdChoice = await askChoice(
+        rl,
+        [
+          targetType === "channel"
+            ? "디스코드 채널 ID를 선택해 주세요."
+            : "DM 대상 유저 ID를 선택해 주세요.",
+          `- 기존 ID: ${reusableTargetId}`
+        ].join("\n"),
+        [
+          { key: "1", label: "기존 ID 사용 (권장)" },
+          { key: "2", label: "새 ID 입력" }
+        ],
+        "1"
+      );
+
+      if (targetIdChoice === "1") {
+        targetId = reusableTargetId;
+        process.stdout.write(
+          targetType === "channel"
+            ? "기존 디스코드 채널 ID를 재사용합니다.\n"
+            : "기존 DM 대상 유저 ID를 재사용합니다.\n"
+        );
+      } else {
+        targetId = await askTargetId(rl, targetType);
+      }
+    } else {
+      targetId = await askTargetId(rl, targetType);
+    }
 
     mentionUserId = (await ask(rl, "알림에 멘션할 유저 ID(선택, Enter로 건너뛰기): ")).trim();
     if (mentionUserId && !isValidSnowflake(mentionUserId)) {
