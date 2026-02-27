@@ -799,6 +799,32 @@ function buildProgressSnapshotKey(state, phase, options = {}) {
   ].join("|");
 }
 
+function isIdleNotificationTrigger(triggerKind) {
+  const token = normalizeSingleLine(triggerKind, 60).toLowerCase();
+  return token === "session.idle" || token === "session.status: idle";
+}
+
+function resolveTerminalRequestPhase(terminationNotice) {
+  if (!terminationNotice) {
+    return "completed";
+  }
+
+  if (terminationNotice.kind === "failed") {
+    return "failed";
+  }
+
+  return "cancelled";
+}
+
+function resetCurrentRequestState(state) {
+  state.currentRequestId = null;
+  state.currentRequestPreview = "";
+  state.currentRequestStartedAt = 0;
+  state.subtaskByCallId.clear();
+  state.userMessageIds.clear();
+  state.lastProgressSnapshotKey = "";
+}
+
 function buildTextDedupeKey(value) {
   return normalizeText(value).replace(/\s+/g, " ").trim().slice(0, 800);
 }
@@ -1590,6 +1616,19 @@ export default async function OpenCodeNotifierPlugin(input) {
     return queued;
   }
 
+  async function finalizeCurrentRequestStatus(state, terminationNotice, elapsedMs) {
+    if (!state.currentRequestId) {
+      return;
+    }
+
+    const phase = resolveTerminalRequestPhase(terminationNotice);
+    await upsertProgressStatus(state, phase, {
+      detail: terminationNotice?.detail || "",
+      elapsedMs
+    });
+    resetCurrentRequestState(state);
+  }
+
   async function notifyIfReady(state, triggerKind) {
     if (!config.enabled) {
       return;
@@ -1606,20 +1645,58 @@ export default async function OpenCodeNotifierPlugin(input) {
       return;
     }
 
+    const now = Date.now();
+    const startedAt = state.responseStartedAt || state.lastAssistantUpdatedAt;
+    const elapsedMs = startedAt > 0 ? Math.max(0, now - startedAt) : null;
+    const shouldFinalizeWithoutNotification = (
+      Boolean(state.currentRequestId)
+      && !interruptNotice
+      && (Boolean(terminationNotice) || isIdleNotificationTrigger(triggerKind))
+    );
+
     if (!state.waitingForInputReady && !terminationNotice && !interruptNotice) {
+      if (shouldFinalizeWithoutNotification) {
+        try {
+          await finalizeCurrentRequestStatus(state, terminationNotice, elapsedMs);
+        } catch (error) {
+          process.stderr.write(`[opencode-notifier-plugin] ${error instanceof Error ? error.message : String(error)}\n`);
+        }
+      }
       return;
     }
 
-    const now = Date.now();
+    async function maybeFinalizeWithoutNotification() {
+      if (!shouldFinalizeWithoutNotification) {
+        return false;
+      }
+
+      try {
+        await finalizeCurrentRequestStatus(state, terminationNotice, elapsedMs);
+      } catch (error) {
+        process.stderr.write(`[opencode-notifier-plugin] ${error instanceof Error ? error.message : String(error)}\n`);
+      }
+
+      return true;
+    }
+
     if (!interruptNotice && now - state.lastNotifiedAt < config.trigger.cooldownMs) {
+      if (await maybeFinalizeWithoutNotification()) {
+        return;
+      }
       return;
     }
 
     if (!terminationNotice && !interruptNotice && config.trigger.requireAssistantMessage && !state.lastAssistantMessageId) {
+      if (await maybeFinalizeWithoutNotification()) {
+        return;
+      }
       return;
     }
 
     if (!terminationNotice && !interruptNotice && isIntermediateAnalysisMessage(state.lastAssistantText)) {
+      if (await maybeFinalizeWithoutNotification()) {
+        return;
+      }
       return;
     }
 
@@ -1629,6 +1706,9 @@ export default async function OpenCodeNotifierPlugin(input) {
       state.lastAssistantMessageId &&
       state.lastAssistantMessageId === state.lastNotifiedMessageId
     ) {
+      if (await maybeFinalizeWithoutNotification()) {
+        return;
+      }
       return;
     }
 
@@ -1638,6 +1718,9 @@ export default async function OpenCodeNotifierPlugin(input) {
       state.lastAssistantMessageId &&
       state.delegationMessageIds.has(state.lastAssistantMessageId)
     ) {
+      if (await maybeFinalizeWithoutNotification()) {
+        return;
+      }
       return;
     }
 
@@ -1652,11 +1735,11 @@ export default async function OpenCodeNotifierPlugin(input) {
       currentTextKey === state.lastNotifiedTextKey &&
       now - state.lastNotifiedAt < config.trigger.dedupeWindowMs
     ) {
+      if (await maybeFinalizeWithoutNotification()) {
+        return;
+      }
       return;
     }
-
-    const startedAt = state.responseStartedAt || state.lastAssistantUpdatedAt;
-    const elapsedMs = startedAt > 0 ? Math.max(0, now - startedAt) : null;
 
     const messageOptions = {
       terminationNotice,
@@ -1673,20 +1756,7 @@ export default async function OpenCodeNotifierPlugin(input) {
           elapsedMs
         });
       } else if (state.currentRequestId) {
-        const phase = terminationNotice
-          ? (terminationNotice.kind === "failed" ? "failed" : "cancelled")
-          : "completed";
-        await upsertProgressStatus(state, phase, {
-          detail: terminationNotice?.detail || "",
-          elapsedMs
-        });
-
-        state.currentRequestId = null;
-        state.currentRequestPreview = "";
-        state.currentRequestStartedAt = 0;
-        state.subtaskByCallId.clear();
-        state.userMessageIds.clear();
-        state.lastProgressSnapshotKey = "";
+        await finalizeCurrentRequestStatus(state, terminationNotice, elapsedMs);
       }
     } catch (error) {
       process.stderr.write(`[opencode-notifier-plugin] ${error instanceof Error ? error.message : String(error)}\n`);
