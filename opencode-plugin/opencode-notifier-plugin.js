@@ -720,82 +720,48 @@ function buildInterruptBody(notice, state) {
   return lines.join("\n");
 }
 
-function summarizeSubtaskProgress(state) {
-  let pending = 0;
-  let running = 0;
-  let completed = 0;
-  let failed = 0;
-
-  for (const item of state.subtaskByCallId.values()) {
-    const status = String(item?.status ?? "").toLowerCase();
-    if (status === "pending") {
-      pending += 1;
-      continue;
-    }
-
-    if (status === "running") {
-      running += 1;
-      continue;
-    }
-
-    if (status === "completed") {
-      completed += 1;
-      continue;
-    }
-
-    if (status === "error") {
-      failed += 1;
-    }
-  }
-
-  const total = pending + running + completed + failed;
-  if (total === 0) {
-    return "";
-  }
-
-  const parts = [];
-  const working = pending + running;
-  if (working > 0) {
-    parts.push(`🔄 ${working} 진행중`);
-  }
-  if (completed > 0) {
-    parts.push(`✅ ${completed} 완료`);
-  }
-  if (failed > 0) {
-    parts.push(`❌ ${failed} 실패`);
-  }
-
-  return parts.join(" / ");
-}
-
 function buildProgressMessageBody(state, phase, options = {}) {
   const promptPreview = normalizeSingleLine(state.currentRequestPreview, 160);
-  const subtaskSummary = summarizeSubtaskProgress(state);
-  const detail = normalizeSingleLine(options.detail, 180);
-  const elapsedMs = Number.isFinite(options.elapsedMs) ? options.elapsedMs : null;
-  const startedAtLabel = Number.isFinite(state.currentRequestStartedAt) && state.currentRequestStartedAt > 0
-    ? new Date(state.currentRequestStartedAt).toLocaleString("ko-KR", { timeZone: "Asia/Seoul" })
+  const startedAtMs = Number.isFinite(state.currentRequestStartedAt) && state.currentRequestStartedAt > 0
+    ? state.currentRequestStartedAt
+    : 0;
+  const elapsedMs = Number.isFinite(options.elapsedMs)
+    ? options.elapsedMs
+    : (startedAtMs > 0 ? Math.max(0, Date.now() - startedAtMs) : null);
+  const startedAtLabel = startedAtMs > 0
+    ? new Date(startedAtMs).toLocaleString("ko-KR", { timeZone: "Asia/Seoul" })
     : "";
   const elapsedLabel = elapsedMs !== null ? formatDurationMs(elapsedMs) : "";
+  const resultPreview = pickNormalizedString([
+    options.resultPreview,
+    state.lastAssistantText
+  ], 320);
+  const detail = normalizeSingleLine(options.detail, 220);
 
   return renderWorkStatusTemplate({
     phase,
     promptPreview,
-    subtaskSummary,
-    detail,
     startedAtLabel,
-    elapsedLabel
+    elapsedLabel,
+    resultPreview,
+    detail
   });
 }
 
 function buildProgressSnapshotKey(state, phase, options = {}) {
-  const detail = normalizeSingleLine(options.detail, 120);
+  const startedAtMs = Number.isFinite(state.currentRequestStartedAt) && state.currentRequestStartedAt > 0
+    ? state.currentRequestStartedAt
+    : 0;
+  const elapsedMs = Number.isFinite(options.elapsedMs)
+    ? options.elapsedMs
+    : (startedAtMs > 0 ? Math.max(0, Date.now() - startedAtMs) : null);
+  const elapsedLabel = elapsedMs !== null ? formatDurationMs(elapsedMs) : "";
+  const normalizedPhase = phase === "started" || phase === "in_progress" ? "active" : phase;
   return [
-    phase,
+    normalizedPhase,
     state.currentRequestId,
     normalizeSingleLine(state.currentRequestPreview, 120),
-    summarizeSubtaskProgress(state),
-    detail
+    normalizedPhase === "active" ? "" : elapsedLabel
   ].join("|");
 }
 
@@ -909,14 +875,85 @@ function buildSessionThreadCacheKey(parentChannelId, sessionID) {
   return `${parentChannelId}::${sessionID}`;
 }
 
+function extractGeneratedThreadTitleFromPrompt(value) {
+  const normalized = normalizeText(value)
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!normalized) {
+    return "";
+  }
+
+  const firstLine = normalized
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .find(Boolean) || "";
+
+  const firstSentence = (firstLine.split(/(?<=[.!?])\s+/)[0] || firstLine)
+    .replace(/^[\-*>#\d).\s]+/, "")
+    .replace(/^['"`\[(]+|['"`\])]+$/g, "")
+    .trim();
+
+  if (!firstSentence) {
+    return "";
+  }
+
+  return truncateText(firstSentence, 54);
+}
+
+function resolveGeneratedThreadTitle(state) {
+  const persisted = normalizeSingleLine(state?.generatedThreadTitle, 90);
+  if (persisted) {
+    return persisted;
+  }
+
+  const fromPreview = extractGeneratedThreadTitleFromPrompt(state?.currentRequestPreview);
+  if (fromPreview) {
+    return fromPreview;
+  }
+
+  return "새 대화";
+}
+
+function updateGeneratedThreadTitleFromPrompt(state, promptText) {
+  const existing = normalizeSingleLine(state?.generatedThreadTitle, 90);
+  if (existing) {
+    return false;
+  }
+
+  const generated = extractGeneratedThreadTitleFromPrompt(promptText);
+  if (!generated) {
+    return false;
+  }
+
+  state.generatedThreadTitle = generated;
+  return true;
+}
+
+function extractUserPromptCandidateFromInfo(info, props) {
+  return pickNormalizedString(
+    [
+      info?.text,
+      info?.content,
+      info?.summary,
+      info?.prompt,
+      props?.message?.content,
+      props?.input,
+      props?.prompt
+    ],
+    320
+  );
+}
+
 function buildSessionThreadName(state) {
   const workspace = normalizeSingleLine(state.workspaceName, 42) || "OpenCode";
-  const sessionLabel = normalizeSingleLine(state.sessionTitle || state.sessionID, 54) || state.sessionID;
+  const sessionLabel = resolveGeneratedThreadTitle(state);
   return truncateText(`${workspace} | ${sessionLabel}`, DISCORD_THREAD_NAME_LIMIT);
 }
 
 function buildSessionThreadStarterText(state) {
-  const sessionLabel = normalizeSingleLine(state.sessionTitle || state.sessionID, 90) || state.sessionID;
+  const sessionLabel = resolveGeneratedThreadTitle(state);
   return truncateText(`🧵 OpenCode 세션 스레드 시작: ${sessionLabel}`, 180);
 }
 
@@ -928,9 +965,13 @@ function resolveThreadWorkspaceKey(state) {
   return normalizeSingleLine(state?.workspaceName, 80).toLowerCase() || "workspace";
 }
 
+function hasUsableGeneratedThreadTitle(state) {
+  return Boolean(normalizeSingleLine(state?.generatedThreadTitle, 160));
+}
+
 function resolveThreadTitleKey(state) {
-  const title = normalizeSingleLine(state?.sessionTitle, 160);
-  if (!title || isGenericSessionTitle(title)) {
+  const title = normalizeSingleLine(state?.generatedThreadTitle, 160);
+  if (!title) {
     return "";
   }
 
@@ -1178,6 +1219,7 @@ function createSessionState(sessionID, workspaceName) {
     workspaceName,
     isChildSession: false,
     sessionTitle: "",
+    generatedThreadTitle: "",
     assistantMessageIds: new Set(),
     userMessageIds: new Set(),
     mutedAssistantMessageIds: new Set(),
@@ -1237,6 +1279,7 @@ export default async function OpenCodeNotifierPlugin(input) {
   const stateBySession = new Map();
   const dmChannelCache = new Map();
   const sessionThreadChannelCache = new Map();
+  const threadTitleByChannelId = new Map();
   const threadDisabledParentChannels = new Set();
   const threadResolutionInFlight = new Map();
   const configDirs = resolveOpenCodeUserConfigDirs();
@@ -1405,6 +1448,66 @@ export default async function OpenCodeNotifierPlugin(input) {
     }
   }
 
+  async function ensureThreadChannelTitle(channelId, state) {
+    const desiredName = buildSessionThreadName(state);
+    if (!desiredName) {
+      return;
+    }
+
+    if (threadTitleByChannelId.get(channelId) === desiredName) {
+      return;
+    }
+
+    try {
+      await discordRequest(config, `/channels/${channelId}`, "PATCH", {
+        name: desiredName
+      });
+      threadTitleByChannelId.set(channelId, desiredName);
+    } catch (error) {
+      process.stderr.write(
+        `[opencode-notifier-plugin] 스레드 제목 갱신에 실패했습니다: ${error instanceof Error ? error.message : String(error)}\n`
+      );
+    }
+  }
+
+  async function syncExistingThreadTitleForState(state) {
+    if (!state?.sessionID || !normalizeSingleLine(state.generatedThreadTitle, 90)) {
+      return;
+    }
+
+    for (const target of config.discord.targets) {
+      if (!canUseSessionThreadForTarget(config, target)) {
+        continue;
+      }
+
+      const cacheKey = buildSessionThreadCacheKey(target.id, state.sessionID);
+      let threadChannelId = sessionThreadChannelCache.get(cacheKey);
+
+      if (!threadChannelId) {
+        const stored = findStoredThreadChannelId(target.id, state);
+        if (!stored) {
+          continue;
+        }
+
+        threadChannelId = stored;
+        sessionThreadChannelCache.set(cacheKey, stored);
+      }
+
+      if (!threadChannelId || threadChannelId === target.id) {
+        continue;
+      }
+
+      try {
+        await ensureThreadChannelTitle(threadChannelId, state);
+        await rememberThreadRoute(target.id, state, threadChannelId);
+      } catch (error) {
+        process.stderr.write(
+          `[opencode-notifier-plugin] 스레드 제목 동기화에 실패했습니다: ${error instanceof Error ? error.message : String(error)}\n`
+        );
+      }
+    }
+  }
+
   async function resolveChannelForTarget(target, state, options = {}) {
     if (target.type === "channel") {
       if (!canUseSessionThreadForTarget(config, target) || !state?.sessionID) {
@@ -1425,8 +1528,16 @@ export default async function OpenCodeNotifierPlugin(input) {
         const storedThreadChannelId = findStoredThreadChannelId(target.id, state);
         if (storedThreadChannelId) {
           sessionThreadChannelCache.set(cacheKey, storedThreadChannelId);
+          threadTitleByChannelId.set(storedThreadChannelId, buildSessionThreadName(state));
           return storedThreadChannelId;
         }
+      }
+
+      if (
+        !options.forceRefreshThread
+        && !hasUsableGeneratedThreadTitle(state)
+      ) {
+        return target.id;
       }
 
       if (threadDisabledParentChannels.has(target.id) && !options.forceRefreshThread) {
@@ -1441,6 +1552,7 @@ export default async function OpenCodeNotifierPlugin(input) {
         try {
           const threadChannelId = await createSessionThread(target.id, state);
           sessionThreadChannelCache.set(cacheKey, threadChannelId);
+          threadTitleByChannelId.set(threadChannelId, buildSessionThreadName(state));
           await rememberThreadRoute(target.id, state, threadChannelId);
           return threadChannelId;
         } catch (error) {
@@ -1515,6 +1627,18 @@ export default async function OpenCodeNotifierPlugin(input) {
           channelId,
           isThreadChannel: target.type === "channel" && channelId !== target.id
         };
+
+        if (resolvedChannel.isThreadChannel) {
+          await ensureThreadChannelTitle(channelId, state);
+
+          try {
+            await rememberThreadRoute(target.id, state, channelId);
+          } catch (error) {
+            process.stderr.write(
+              `[opencode-notifier-plugin] 스레드 라우팅 갱신에 실패했습니다: ${error instanceof Error ? error.message : String(error)}\n`
+            );
+          }
+        }
       }
 
       try {
@@ -1828,20 +1952,43 @@ export default async function OpenCodeNotifierPlugin(input) {
 
         if (info?.role === "user" && typeof info.id === "string") {
           const now = Date.now();
+          const isSameRequest = state.currentRequestId === info.id && state.currentRequestStartedAt > 0;
           state.userMessageIds.add(info.id);
-          state.currentRequestId = info.id;
-          state.currentRequestStartedAt = now;
-          state.currentRequestPreview = "";
-          state.subtaskByCallId.clear();
-          state.lastProgressSnapshotKey = "";
+
+          if (!isSameRequest) {
+            state.currentRequestId = info.id;
+            state.currentRequestStartedAt = now;
+            state.currentRequestPreview = "";
+            state.subtaskByCallId.clear();
+            state.lastProgressSnapshotKey = "";
+          } else if (!Number.isFinite(state.currentRequestStartedAt) || state.currentRequestStartedAt <= 0) {
+            state.currentRequestStartedAt = now;
+          }
 
           const cachedPrompt = state.textByMessageId.get(info.id);
-          if (typeof cachedPrompt === "string" && cachedPrompt.trim()) {
-            state.currentRequestPreview = cachedPrompt;
+          const promptCandidate = (typeof cachedPrompt === "string" && cachedPrompt.trim())
+            ? cachedPrompt
+            : extractUserPromptCandidateFromInfo(info, props);
+
+          if (promptCandidate) {
+            state.currentRequestPreview = promptCandidate;
+            const titleUpdated = updateGeneratedThreadTitleFromPrompt(state, promptCandidate);
+
+            if (titleUpdated) {
+              try {
+                await syncExistingThreadTitleForState(state);
+              } catch (error) {
+                process.stderr.write(`[opencode-notifier-plugin] ${error instanceof Error ? error.message : String(error)}\n`);
+              }
+            }
+          }
+
+          if (!state.currentRequestPreview && !isSameRequest) {
+            return;
           }
 
           try {
-            await upsertProgressStatus(state, "started");
+            await upsertProgressStatus(state, isSameRequest ? "in_progress" : "started");
           } catch (error) {
             process.stderr.write(`[opencode-notifier-plugin] ${error instanceof Error ? error.message : String(error)}\n`);
           }
@@ -1947,9 +2094,20 @@ export default async function OpenCodeNotifierPlugin(input) {
 
         if (state.currentRequestId === part.messageID && state.userMessageIds.has(part.messageID)) {
           state.currentRequestPreview = nextText;
+          const titleUpdated = updateGeneratedThreadTitleFromPrompt(state, nextText);
+
+          if (titleUpdated) {
+            try {
+              await syncExistingThreadTitleForState(state);
+            } catch (error) {
+              process.stderr.write(`[opencode-notifier-plugin] ${error instanceof Error ? error.message : String(error)}\n`);
+            }
+          }
+
+          const progressPhase = state.lastProgressSnapshotKey ? "in_progress" : "started";
 
           try {
-            await upsertProgressStatus(state, "in_progress");
+            await upsertProgressStatus(state, progressPhase);
           } catch (error) {
             process.stderr.write(`[opencode-notifier-plugin] ${error instanceof Error ? error.message : String(error)}\n`);
           }

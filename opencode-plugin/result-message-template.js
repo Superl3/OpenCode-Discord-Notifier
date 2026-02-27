@@ -31,6 +31,7 @@ export function renderResultMessageTemplate(input) {
     !omitHeader && environmentNotice ? `> ⚙️ **환경**: ${environmentNotice}` : null,
     metadataLines || null,
     body || null,
+    // 원본 데이터가 잘리더라도 코드 블록이 닫히도록 구성
     includeRawBlock ? `📦 **원본 데이터**\n\`\`\`text\n${truncateText(rawText || "(비어 있음)", 700)}\n\`\`\`` : null
   ]);
 
@@ -38,5 +39,6 @@ export function renderResultMessageTemplate(input) {
     content = `🔔 <@${mentionUserId}>\n\n${content}`;
   }
 
+  // 전체 컨텐츠 길이 제한 적용
   return truncateText(content, maxChars);
 }
