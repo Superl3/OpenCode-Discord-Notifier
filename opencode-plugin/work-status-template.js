@@ -35,7 +35,7 @@ export function renderWorkStatusTemplate(input) {
     return buildLines([
       "❌ **처리 실패**",
       "",
-      `🔹 **수행한 작업**: ${subtaskSummary || "없음"}`,
+      subtaskSummary ? `🔹 **수행한 작업**: ${subtaskSummary}` : null,
       elapsedLabel ? `⏱️ **소요 시간**: ${elapsedLabel}` : null,
       detail ? `📝 **실패 원인**: ${detail}` : null
     ]);
@@ -46,7 +46,7 @@ export function renderWorkStatusTemplate(input) {
     return buildLines([
       isCompleted ? "✅ **처리 완료**" : "🛑 **처리 중단 (취소됨)**",
       "",
-      `🔹 **수행한 작업**: ${subtaskSummary || "없음"}`,
+      subtaskSummary ? `🔹 **수행한 작업**: ${subtaskSummary}` : null,
       elapsedLabel ? `⏱️ **소요 시간**: ${elapsedLabel}` : null,
       detail ? `📝 **비고**: ${detail}` : null
     ]);

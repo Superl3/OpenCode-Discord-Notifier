@@ -1646,7 +1646,7 @@ export default async function OpenCodeNotifierPlugin(input) {
     }
 
     const now = Date.now();
-    const startedAt = state.responseStartedAt || state.lastAssistantUpdatedAt;
+    const startedAt = state.currentRequestStartedAt || state.responseStartedAt || state.lastAssistantUpdatedAt;
     const elapsedMs = startedAt > 0 ? Math.max(0, now - startedAt) : null;
     const shouldFinalizeWithoutNotification = (
       Boolean(state.currentRequestId)
