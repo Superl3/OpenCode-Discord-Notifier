@@ -1,6 +1,8 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
+import { renderResultMessageTemplate } from "./result-message-template.js";
+import { renderWorkStatusTemplate } from "./work-status-template.js";
 
 const DISCORD_CONTENT_LIMIT = 2000;
 const DISCORD_THREAD_NAME_LIMIT = 100;
@@ -162,10 +164,34 @@ function sanitizeTargets(rawTargets) {
     return [];
   }
 
-  return rawTargets
-    .filter((target) => isPlainObject(target))
-    .filter((target) => typeof target.type === "string" && typeof target.id === "string")
-    .map((target) => ({ type: target.type, id: target.id }));
+  const normalized = [];
+  const seen = new Set();
+
+  for (const target of rawTargets) {
+    if (!isPlainObject(target)) {
+      continue;
+    }
+
+    if (typeof target.type !== "string" || typeof target.id !== "string") {
+      continue;
+    }
+
+    const type = normalizeSingleLine(target.type, 20).toLowerCase();
+    const id = normalizeSingleLine(target.id, 120);
+    if (!type || !id) {
+      continue;
+    }
+
+    const key = `${type}:${id}`;
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    normalized.push({ type, id });
+  }
+
+  return normalized;
 }
 
 function isPlaceholder(value) {
@@ -683,15 +709,6 @@ function buildInterruptBody(notice, state) {
   return lines.join("\n");
 }
 
-function buildRequestToken(value) {
-  const compact = String(value ?? "").replace(/[^a-zA-Z0-9]/g, "");
-  if (!compact) {
-    return "unknown";
-  }
-
-  return compact.slice(-8);
-}
-
 function summarizeSubtaskProgress(state) {
   let pending = 0;
   let running = 0;
@@ -722,7 +739,7 @@ function summarizeSubtaskProgress(state) {
 
   const total = pending + running + completed + failed;
   if (total === 0) {
-    return "🧩 하위 작업: 없음";
+    return "";
   }
 
   const parts = [];
@@ -737,60 +754,27 @@ function summarizeSubtaskProgress(state) {
     parts.push(`❌ ${failed} 실패`);
   }
 
-  return `🧩 하위 작업: ${parts.join(" / ")}`;
+  return parts.join(" / ");
 }
 
 function buildProgressMessageBody(state, phase, options = {}) {
-  const requestToken = buildRequestToken(state.currentRequestId);
   const promptPreview = normalizeSingleLine(state.currentRequestPreview, 160);
   const subtaskSummary = summarizeSubtaskProgress(state);
   const detail = normalizeSingleLine(options.detail, 180);
   const elapsedMs = Number.isFinite(options.elapsedMs) ? options.elapsedMs : null;
-  const startedAt = Number.isFinite(state.currentRequestStartedAt) && state.currentRequestStartedAt > 0
+  const startedAtLabel = Number.isFinite(state.currentRequestStartedAt) && state.currentRequestStartedAt > 0
     ? new Date(state.currentRequestStartedAt).toLocaleString("ko-KR", { timeZone: "Asia/Seoul" })
-    : "측정 불가";
+    : "";
+  const elapsedLabel = elapsedMs !== null ? formatDurationMs(elapsedMs) : "";
 
-  if (phase === "waiting_user") {
-    const lines = [
-      "🟠 사용자 응답 대기",
-      `- 요청: #${requestToken}`,
-      "- 상태: 선택/토큰 입력/승인 응답을 기다리는 중입니다.",
-      `- ${subtaskSummary}`
-    ];
-
-    if (detail) {
-      lines.push(`- 상세: ${detail}`);
-    }
-
-    return lines.join("\n");
-  }
-
-  if (phase === "completed" || phase === "cancelled") {
-    const lines = [
-      "~~🟡 작업 수행중...~~",
-      phase === "cancelled" ? "⚪ 처리 종료(취소/중단)" : "✅ 처리 완료",
-      `- 요청: #${requestToken}`,
-      `- ${subtaskSummary}`
-    ];
-
-    if (elapsedMs !== null) {
-      lines.push(`- 경과 시간: ${formatDurationMs(elapsedMs)}`);
-    }
-
-    if (detail) {
-      lines.push(`- 비고: ${detail}`);
-    }
-
-    return lines.join("\n");
-  }
-
-  return [
-    "🟡 작업 수행중...",
-    `- 요청: #${requestToken}`,
-    promptPreview ? `- 프롬프트: ${promptPreview}` : "- 프롬프트: (입력 텍스트 수집 중)",
-    `- 시작 시각: ${startedAt}`,
-    `- ${subtaskSummary}`
-  ].join("\n");
+  return renderWorkStatusTemplate({
+    phase,
+    promptPreview,
+    subtaskSummary,
+    detail,
+    startedAtLabel,
+    elapsedLabel
+  });
 }
 
 function buildProgressSnapshotKey(state, phase, options = {}) {
@@ -1079,47 +1063,36 @@ function buildMessageBody(config, state, triggerKind, options = {}) {
     }
   }
 
-  const sections = [];
-
-  if (!omitHeader) {
-    sections.push(`**${headerTitle}**`);
-  } else if (state.currentRequestId) {
-    sections.push(`- 요청: #${buildRequestToken(state.currentRequestId)}`);
-  }
-
-  if (!omitHeader && shouldShowEnvironmentNotice(config.environment)) {
-    sections.push(buildUnregisteredEnvironmentNotice(config.environment.runtimeKey));
-  }
-
+  const metadataLines = [];
   if (config.message.includeMetadata) {
-    const metadataLines = [
-      `- 시간: ${new Date(measuredAt).toLocaleString("ko-KR", { timeZone: "Asia/Seoul" })}`,
-      `- 트리거: ${triggerKind}`,
-      `- 모드: ${config.message.mode}`
-    ];
+    metadataLines.push(
+      `- 시간: ${new Date(measuredAt).toLocaleString("ko-KR", { timeZone: "Asia/Seoul" })}`
+    );
 
     if (elapsedMs !== null) {
-      metadataLines.splice(1, 0, `- 경과 시간: ${formatDurationMs(elapsedMs)}`);
+      metadataLines.push(`- 경과 시간: ${formatDurationMs(elapsedMs)}`);
     }
 
-    sections.push(
-      metadataLines.join("\n")
-    );
+    metadataLines.push(`- 트리거: ${triggerKind}`);
+    metadataLines.push(`- 모드: ${config.message.mode}`);
   }
 
-  sections.push(body);
-
-  if (!terminationNotice && !interruptNotice && config.message.includeRawInCodeBlock && config.message.mode !== "raw") {
-    sections.push("**원문**");
-    sections.push(`\`\`\`text\n${truncateText(normalized || "(비어 있음)", 700)}\n\`\`\``);
-  }
-
-  let content = sections.filter(Boolean).join("\n\n");
-  if (config.discord.mentionUserId) {
-    content = `<@${config.discord.mentionUserId}>\n${content}`;
-  }
-
-  return truncateText(content, config.message.maxChars);
+  return renderResultMessageTemplate({
+    omitHeader,
+    headerTitle,
+    environmentNotice: shouldShowEnvironmentNotice(config.environment)
+      ? buildUnregisteredEnvironmentNotice(config.environment.runtimeKey)
+      : "",
+    metadataLines,
+    body,
+    includeRawBlock: !terminationNotice
+      && !interruptNotice
+      && config.message.includeRawInCodeBlock
+      && config.message.mode !== "raw",
+    rawText: normalized || "(비어 있음)",
+    mentionUserId: config.discord.mentionUserId,
+    maxChars: config.message.maxChars
+  });
 }
 
 function resolveFetchImplementation() {
@@ -1181,6 +1154,7 @@ function createSessionState(sessionID, workspaceName) {
     currentRequestPreview: "",
     currentRequestStartedAt: 0,
     lastProgressSnapshotKey: "",
+    progressUpdateChain: Promise.resolve(),
     lastNotifiedMessageId: null,
     lastNotifiedTextKey: "",
     lastNotifiedAt: 0,
@@ -1227,6 +1201,7 @@ export default async function OpenCodeNotifierPlugin(input) {
   const dmChannelCache = new Map();
   const sessionThreadChannelCache = new Map();
   const threadDisabledParentChannels = new Set();
+  const threadResolutionInFlight = new Map();
   const configDirs = resolveOpenCodeUserConfigDirs();
   const threadRouteStoreDir = configDirs[0] || join(homedir(), ".config", "opencode");
   const threadRouteStorePath = join(threadRouteStoreDir, THREAD_ROUTE_STORE_FILE);
@@ -1421,21 +1396,34 @@ export default async function OpenCodeNotifierPlugin(input) {
         return target.id;
       }
 
-      try {
-        const threadChannelId = await createSessionThread(target.id, state);
-        sessionThreadChannelCache.set(cacheKey, threadChannelId);
-        await rememberThreadRoute(target.id, state, threadChannelId);
-        return threadChannelId;
-      } catch (error) {
-        if (shouldDisableThreadOnError(error)) {
-          threadDisabledParentChannels.add(target.id);
-        }
-
-        process.stderr.write(
-          `[opencode-notifier-plugin] 세션 스레드 생성에 실패해 기본 채널로 전송합니다: ${error instanceof Error ? error.message : String(error)}\n`
-        );
-        return target.id;
+      if (threadResolutionInFlight.has(cacheKey)) {
+        return threadResolutionInFlight.get(cacheKey);
       }
+
+      const resolvePromise = (async () => {
+        try {
+          const threadChannelId = await createSessionThread(target.id, state);
+          sessionThreadChannelCache.set(cacheKey, threadChannelId);
+          await rememberThreadRoute(target.id, state, threadChannelId);
+          return threadChannelId;
+        } catch (error) {
+          if (shouldDisableThreadOnError(error)) {
+            threadDisabledParentChannels.add(target.id);
+          }
+
+          process.stderr.write(
+            `[opencode-notifier-plugin] 세션 스레드 생성에 실패해 기본 채널로 전송합니다: ${error instanceof Error ? error.message : String(error)}\n`
+          );
+          return target.id;
+        } finally {
+          if (threadResolutionInFlight.get(cacheKey) === resolvePromise) {
+            threadResolutionInFlight.delete(cacheKey);
+          }
+        }
+      })();
+
+      threadResolutionInFlight.set(cacheKey, resolvePromise);
+      return resolvePromise;
     }
 
     if (target.type !== "user") {
@@ -1479,15 +1467,21 @@ export default async function OpenCodeNotifierPlugin(input) {
   async function withTargetChannel(target, state, handler) {
     const useSessionThread = canUseSessionThreadForTarget(config, target);
     let firstError = null;
+    let resolvedChannel = null;
 
     for (let attempt = 0; attempt < (useSessionThread ? 2 : 1); attempt += 1) {
-      const channelId = await resolveChannelForTarget(target, state, {
-        forceRefreshThread: useSessionThread && attempt > 0
-      });
-      const isThreadChannel = target.type === "channel" && channelId !== target.id;
+      if (!resolvedChannel) {
+        const channelId = await resolveChannelForTarget(target, state, {
+          forceRefreshThread: false
+        });
+        resolvedChannel = {
+          channelId,
+          isThreadChannel: target.type === "channel" && channelId !== target.id
+        };
+      }
 
       try {
-        return await handler({ channelId, isThreadChannel });
+        return await handler(resolvedChannel);
       } catch (error) {
         if (!firstError) {
           firstError = error;
@@ -1495,6 +1489,13 @@ export default async function OpenCodeNotifierPlugin(input) {
 
         if (!useSessionThread || attempt > 0) {
           throw error;
+        }
+
+        if (resolvedChannel.isThreadChannel) {
+          resolvedChannel = {
+            channelId: target.id,
+            isThreadChannel: false
+          };
         }
       }
     }
@@ -1523,44 +1524,59 @@ export default async function OpenCodeNotifierPlugin(input) {
       return;
     }
 
-    const snapshotKey = buildProgressSnapshotKey(state, phase, options);
-    const forceUpdate = phase === "completed" || phase === "cancelled" || phase === "waiting_user";
-    if (!forceUpdate && snapshotKey === state.lastProgressSnapshotKey) {
-      return;
-    }
-    state.lastProgressSnapshotKey = snapshotKey;
+    const requestId = state.currentRequestId;
+    const queuedOperation = async () => {
+      if (!state.currentRequestId || state.currentRequestId !== requestId) {
+        return;
+      }
 
-    for (const target of config.discord.targets) {
-      await withTargetChannel(target, state, async ({ channelId }) => {
-        const targetKey = buildTargetKey(target);
-        const entry = state.statusMessageByTarget.get(targetKey);
-        const content = buildProgressMessageBody(state, phase, options);
+      const snapshotKey = buildProgressSnapshotKey(state, phase, options);
+      const forceUpdate = phase === "completed" || phase === "cancelled" || phase === "waiting_user";
+      if (!forceUpdate && snapshotKey === state.lastProgressSnapshotKey) {
+        return;
+      }
+      state.lastProgressSnapshotKey = snapshotKey;
 
-        if (
-          entry
-          && entry.requestId === state.currentRequestId
-          && entry.channelId === channelId
-          && typeof entry.messageId === "string"
-          && entry.messageId
-        ) {
-          try {
-            await editChannelMessage(channelId, entry.messageId, content);
-            return;
-          } catch {
-            // ignore and recreate below
+      for (const target of config.discord.targets) {
+        await withTargetChannel(target, state, async ({ channelId }) => {
+          const targetKey = buildTargetKey(target);
+          const entry = state.statusMessageByTarget.get(targetKey);
+          const content = buildProgressMessageBody(state, phase, options);
+
+          if (
+            entry
+            && entry.requestId === requestId
+            && entry.channelId === channelId
+            && typeof entry.messageId === "string"
+            && entry.messageId
+          ) {
+            try {
+              await editChannelMessage(channelId, entry.messageId, content);
+              return;
+            } catch {
+              // ignore and recreate below
+            }
           }
-        }
 
-        const sent = await postChannelMessage(channelId, content, false);
-        if (sent && typeof sent.id === "string" && sent.id) {
-          state.statusMessageByTarget.set(targetKey, {
-            requestId: state.currentRequestId,
-            channelId,
-            messageId: sent.id
-          });
-        }
-      });
-    }
+          const sent = await postChannelMessage(channelId, content, false);
+          if (sent && typeof sent.id === "string" && sent.id) {
+            state.statusMessageByTarget.set(targetKey, {
+              requestId,
+              channelId,
+              messageId: sent.id
+            });
+          }
+        });
+      }
+    };
+
+    const chain = state.progressUpdateChain || Promise.resolve();
+    const queued = chain
+      .catch(() => {})
+      .then(queuedOperation);
+
+    state.progressUpdateChain = queued.catch(() => {});
+    return queued;
   }
 
   async function notifyIfReady(state, triggerKind) {

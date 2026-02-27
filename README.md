@@ -286,6 +286,8 @@ npm run plugin:uninstall
   - `~/.config/opencode/opencode-notifier-session-threads.json`에 채널+세션(및 비-generic 세션 제목) 기준 매핑을 저장해 재시작 후에도 기존 스레드를 우선 재사용
 - 상태 메시지 업데이트 (고정 동작)
   - 새 사용자 프롬프트가 들어오면 작업 상태 메시지를 먼저 전송하고, 하위 subtask 진행 상황을 이모지(`🔄/✅/❌`)로 갱신한 뒤 완료 시 동일 메시지를 완료 상태로 수정
+  - 작업 시작/대기/완료 템플릿 코드는 `opencode-plugin/work-status-template.js`로 분리되어 있어 문구만 따로 수정 가능
+  - 결과 본문 템플릿 코드는 `opencode-plugin/result-message-template.js`에서 외부 export로 분리되어 있어 포맷을 독립적으로 수정 가능
 
 ## 디스코드 봇 권한/초대 설정
 
@@ -313,7 +315,7 @@ https://discord.com/api/oauth2/authorize?client_id=YOUR_CLIENT_ID&scope=bot&perm
 - 세션 스레드 사용 시: 위 권한에 더해 스레드 생성/전송 권한이 있어야 하며, 없으면 기본 채널 전송으로 자동 폴백됩니다.
 - DM 전송: 봇이 대상 유저와 DM을 열 수 있어야 합니다.
 - 채널 ID만 넣고 DM을 비워 둬도 정상 동작합니다.
-- 스레드 모드에서는 반복 헤더 대신 요청 식별자(`#요청ID`) 중심으로 본문이 전송됩니다.
+- 스레드 모드에서는 반복 헤더와 요청 식별자 노출 없이 본문 중심으로 전송됩니다.
 
 ## 알림 포맷 예시
 
