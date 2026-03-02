@@ -61,7 +61,11 @@
     "mentionUserId": null,
     "timeoutMs": 10000,
     "sessionThreadsEnabled": true,
-    "sessionThreadAutoArchiveMinutes": 1440
+    "sessionThreadAutoArchiveMinutes": 1440,
+    "staleThreadCleanupEnabled": false,
+    "staleThreadCleanupIntervalMs": 21600000,
+    "staleThreadInactivityMs": 2592000000,
+    "staleThreadCleanupMaxDeletePerRun": 20
   },
   "environment": {
     "labelsByKey": {}

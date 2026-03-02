@@ -10,6 +10,13 @@ const DISCORD_THREAD_AUTO_ARCHIVE_MINUTES = new Set([60, 1440, 4320, 10080]);
 const THREAD_ROUTE_STORE_FILE = "opencode-notifier-session-threads.json";
 const THREAD_ROUTE_STORE_VERSION = 1;
 const THREAD_ROUTE_MAX_AGE_MS = 1000 * 60 * 60 * 24 * 21;
+const THREAD_CLEANUP_INTERVAL_MIN_MS = 1000 * 60 * 5;
+const THREAD_CLEANUP_INTERVAL_MAX_MS = 1000 * 60 * 60 * 24 * 14;
+const THREAD_CLEANUP_INTERVAL_DEFAULT_MS = 1000 * 60 * 60 * 6;
+const THREAD_STALE_INACTIVITY_MIN_MS = 1000 * 60 * 60 * 24;
+const THREAD_STALE_INACTIVITY_MAX_MS = 1000 * 60 * 60 * 24 * 180;
+const THREAD_STALE_INACTIVITY_DEFAULT_MS = 1000 * 60 * 60 * 24 * 30;
+const THREAD_CLEANUP_MAX_DELETE_PER_RUN_DEFAULT = 20;
 
 function stripAnsi(value) {
   return String(value ?? "").replace(/\u001b\[[0-9;]*m/g, "");
@@ -130,7 +137,11 @@ function buildDefaultConfig() {
       mentionUserId: null,
       timeoutMs: 10000,
       sessionThreadsEnabled: true,
-      sessionThreadAutoArchiveMinutes: 1440
+      sessionThreadAutoArchiveMinutes: 1440,
+      staleThreadCleanupEnabled: false,
+      staleThreadCleanupIntervalMs: THREAD_CLEANUP_INTERVAL_DEFAULT_MS,
+      staleThreadInactivityMs: THREAD_STALE_INACTIVITY_DEFAULT_MS,
+      staleThreadCleanupMaxDeletePerRun: THREAD_CLEANUP_MAX_DELETE_PER_RUN_DEFAULT
     },
     environment: {
       labelsByKey: {}
@@ -223,6 +234,36 @@ function normalizeSessionThreadAutoArchiveMinutes(value) {
   }
 
   return 1440;
+}
+
+function normalizeThreadCleanupIntervalMs(value) {
+  if (!Number.isFinite(value)) {
+    return THREAD_CLEANUP_INTERVAL_DEFAULT_MS;
+  }
+
+  return Math.min(
+    Math.max(Math.round(value), THREAD_CLEANUP_INTERVAL_MIN_MS),
+    THREAD_CLEANUP_INTERVAL_MAX_MS
+  );
+}
+
+function normalizeThreadStaleInactivityMs(value) {
+  if (!Number.isFinite(value)) {
+    return THREAD_STALE_INACTIVITY_DEFAULT_MS;
+  }
+
+  return Math.min(
+    Math.max(Math.round(value), THREAD_STALE_INACTIVITY_MIN_MS),
+    THREAD_STALE_INACTIVITY_MAX_MS
+  );
+}
+
+function normalizeThreadCleanupMaxDeletePerRun(value) {
+  if (!Number.isFinite(value)) {
+    return THREAD_CLEANUP_MAX_DELETE_PER_RUN_DEFAULT;
+  }
+
+  return Math.min(Math.max(Math.round(value), 1), 200);
 }
 
 function normalizeSingleLine(value, maxChars = 120) {
@@ -837,6 +878,16 @@ function normalizeRuntimeConfig(raw) {
       sessionThreadsEnabled: merged.discord?.sessionThreadsEnabled !== false,
       sessionThreadAutoArchiveMinutes: normalizeSessionThreadAutoArchiveMinutes(
         merged.discord?.sessionThreadAutoArchiveMinutes
+      ),
+      staleThreadCleanupEnabled: merged.discord?.staleThreadCleanupEnabled === true,
+      staleThreadCleanupIntervalMs: normalizeThreadCleanupIntervalMs(
+        merged.discord?.staleThreadCleanupIntervalMs
+      ),
+      staleThreadInactivityMs: normalizeThreadStaleInactivityMs(
+        merged.discord?.staleThreadInactivityMs
+      ),
+      staleThreadCleanupMaxDeletePerRun: normalizeThreadCleanupMaxDeletePerRun(
+        merged.discord?.staleThreadCleanupMaxDeletePerRun
       )
     },
     environment
@@ -999,6 +1050,54 @@ function buildThreadRouteStoreKey(parentChannelId, identityKey) {
   return `${parentChannelId}::${identityKey}`;
 }
 
+function extractParentChannelIdFromThreadRouteStoreKey(storeKey) {
+  if (typeof storeKey !== "string") {
+    return "";
+  }
+
+  const separatorIndex = storeKey.indexOf("::");
+  if (separatorIndex <= 0) {
+    return "";
+  }
+
+  return normalizeSingleLine(storeKey.slice(0, separatorIndex), 120);
+}
+
+function isLikelyDiscordSnowflake(value) {
+  return /^\d{15,22}$/.test(String(value ?? "").trim());
+}
+
+function snowflakeToTimestampMs(value) {
+  const snowflake = String(value ?? "").trim();
+  if (!isLikelyDiscordSnowflake(snowflake)) {
+    return 0;
+  }
+
+  try {
+    const timestampBigInt = (BigInt(snowflake) >> 22n) + 1420070400000n;
+    const timestamp = Number(timestampBigInt);
+    return Number.isFinite(timestamp) && timestamp > 0 ? timestamp : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function parseTimestampMs(value) {
+  if (typeof value !== "string" || !value.trim()) {
+    return 0;
+  }
+
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+function resolveThreadLastActivityAt(threadChannel, fallbackUpdatedAt = 0) {
+  const lastMessageAt = snowflakeToTimestampMs(threadChannel?.last_message_id);
+  const archivedAt = parseTimestampMs(threadChannel?.thread_metadata?.archive_timestamp);
+  const fallback = Number.isFinite(fallbackUpdatedAt) && fallbackUpdatedAt > 0 ? fallbackUpdatedAt : 0;
+  return Math.max(lastMessageAt, archivedAt, fallback);
+}
+
 function createDefaultThreadRouteStore() {
   return {
     version: THREAD_ROUTE_STORE_VERSION,
@@ -1042,6 +1141,11 @@ function normalizeThreadRouteStore(raw) {
 
 function canUseSessionThreadForTarget(config, target) {
   return config.discord.sessionThreadsEnabled && target?.type === "channel";
+}
+
+function isDiscordNotFoundError(error) {
+  const text = String(error instanceof Error ? error.message : error).toLowerCase();
+  return text.includes("(404)") || text.includes("unknown channel") || text.includes("unknown thread");
 }
 
 function shouldDisableThreadOnError(error) {
@@ -1282,6 +1386,8 @@ export default async function OpenCodeNotifierPlugin(input) {
   const threadTitleByChannelId = new Map();
   const threadDisabledParentChannels = new Set();
   const threadResolutionInFlight = new Map();
+  let lastStaleThreadCleanupAt = 0;
+  let staleThreadCleanupInFlight = null;
   const configDirs = resolveOpenCodeUserConfigDirs();
   const threadRouteStoreDir = configDirs[0] || join(homedir(), ".config", "opencode");
   const threadRouteStorePath = join(threadRouteStoreDir, THREAD_ROUTE_STORE_FILE);
@@ -1374,6 +1480,185 @@ export default async function OpenCodeNotifierPlugin(input) {
     }
   }
 
+  function collectTrackedThreadCandidates() {
+    const parentChannelIds = new Set();
+    for (const target of config.discord.targets) {
+      if (canUseSessionThreadForTarget(config, target)) {
+        parentChannelIds.add(target.id);
+      }
+    }
+
+    if (parentChannelIds.size === 0) {
+      return [];
+    }
+
+    const candidatesByThreadId = new Map();
+    for (const [storeKey, entry] of Object.entries(threadRouteStore.routes)) {
+      if (!isPlainObject(entry)) {
+        continue;
+      }
+
+      const parentChannelId = extractParentChannelIdFromThreadRouteStoreKey(storeKey);
+      if (!parentChannelId || !parentChannelIds.has(parentChannelId)) {
+        continue;
+      }
+
+      const threadId = normalizeSingleLine(entry.threadId, 120);
+      if (!threadId || threadId === parentChannelId) {
+        continue;
+      }
+
+      const updatedAt = Number.isFinite(entry.updatedAt) ? entry.updatedAt : 0;
+      const existing = candidatesByThreadId.get(threadId);
+      if (!existing || updatedAt < existing.updatedAt) {
+        candidatesByThreadId.set(threadId, {
+          threadId,
+          parentChannelId,
+          updatedAt
+        });
+      }
+    }
+
+    return [...candidatesByThreadId.values()].sort((left, right) => left.updatedAt - right.updatedAt);
+  }
+
+  async function forgetThreadRoutesByThreadIds(threadIds) {
+    if (!(threadIds instanceof Set) || threadIds.size === 0) {
+      return;
+    }
+
+    let changed = false;
+    for (const [storeKey, entry] of Object.entries(threadRouteStore.routes)) {
+      if (!isPlainObject(entry)) {
+        continue;
+      }
+
+      const threadId = normalizeSingleLine(entry.threadId, 120);
+      if (!threadIds.has(threadId)) {
+        continue;
+      }
+
+      delete threadRouteStore.routes[storeKey];
+      changed = true;
+    }
+
+    if (changed) {
+      try {
+        await persistThreadRouteStore();
+      } catch (error) {
+        process.stderr.write(
+          `[opencode-notifier-plugin] 자동 정리 후 스레드 라우팅 정보를 저장하지 못했습니다: ${error instanceof Error ? error.message : String(error)}\n`
+        );
+      }
+    }
+
+    for (const [cacheKey, channelId] of sessionThreadChannelCache.entries()) {
+      if (threadIds.has(channelId)) {
+        sessionThreadChannelCache.delete(cacheKey);
+      }
+    }
+
+    for (const threadId of threadIds) {
+      threadTitleByChannelId.delete(threadId);
+    }
+  }
+
+  async function cleanupStaleSessionThreadsIfNeeded() {
+    if (
+      !config.enabled
+      || !hasUsableDiscordConfig(config)
+      || !config.discord.sessionThreadsEnabled
+      || !config.discord.staleThreadCleanupEnabled
+    ) {
+      return;
+    }
+
+    const now = Date.now();
+
+    if (staleThreadCleanupInFlight) {
+      return staleThreadCleanupInFlight;
+    }
+
+    if (
+      lastStaleThreadCleanupAt > 0
+      && now - lastStaleThreadCleanupAt < config.discord.staleThreadCleanupIntervalMs
+    ) {
+      return;
+    }
+
+    lastStaleThreadCleanupAt = now;
+
+    const cleanupPromise = (async () => {
+      const candidates = collectTrackedThreadCandidates();
+      if (candidates.length === 0) {
+        return;
+      }
+
+      const staleCutoffAt = now - config.discord.staleThreadInactivityMs;
+      const removableThreadIds = new Set();
+      let deletedCount = 0;
+
+      for (const candidate of candidates) {
+        if (deletedCount >= config.discord.staleThreadCleanupMaxDeletePerRun) {
+          break;
+        }
+
+        let threadChannel = null;
+        try {
+          threadChannel = await discordRequest(config, `/channels/${candidate.threadId}`, "GET");
+        } catch (error) {
+          if (isDiscordNotFoundError(error)) {
+            removableThreadIds.add(candidate.threadId);
+          }
+          continue;
+        }
+
+        if (!isPlainObject(threadChannel?.thread_metadata)) {
+          removableThreadIds.add(candidate.threadId);
+          continue;
+        }
+
+        const lastActivityAt = resolveThreadLastActivityAt(threadChannel, candidate.updatedAt);
+        if (!Number.isFinite(lastActivityAt) || lastActivityAt <= 0 || lastActivityAt > staleCutoffAt) {
+          continue;
+        }
+
+        try {
+          await discordRequest(config, `/channels/${candidate.threadId}`, "DELETE");
+          removableThreadIds.add(candidate.threadId);
+          deletedCount += 1;
+        } catch (error) {
+          if (isDiscordNotFoundError(error)) {
+            removableThreadIds.add(candidate.threadId);
+            continue;
+          }
+
+          process.stderr.write(
+            `[opencode-notifier-plugin] 비활성 스레드 자동 삭제에 실패했습니다 (thread=${candidate.threadId}): ${error instanceof Error ? error.message : String(error)}\n`
+          );
+        }
+      }
+
+      if (removableThreadIds.size > 0) {
+        await forgetThreadRoutesByThreadIds(removableThreadIds);
+      }
+
+      if (deletedCount > 0) {
+        process.stderr.write(`[opencode-notifier-plugin] 비활성 세션 스레드 ${deletedCount}개를 자동 삭제했습니다.\n`);
+      }
+    })();
+
+    staleThreadCleanupInFlight = cleanupPromise;
+
+    try {
+      await cleanupPromise;
+    } finally {
+      if (staleThreadCleanupInFlight === cleanupPromise) {
+        staleThreadCleanupInFlight = null;
+      }
+    }
+  }
+
   if (config.environment.requiresSetup) {
     process.stderr.write(
       [
@@ -1445,6 +1730,21 @@ export default async function OpenCodeNotifierPlugin(input) {
       }
 
       return createForumThread(parentChannelId, state);
+    }
+  }
+
+  async function inviteMentionUserToThread(parentChannelId, threadChannelId) {
+    const mentionUserId = normalizeSingleLine(config.discord.mentionUserId, 120);
+    if (!mentionUserId || !threadChannelId || threadChannelId === parentChannelId) {
+      return;
+    }
+
+    try {
+      await discordRequest(config, `/channels/${threadChannelId}/thread-members/${mentionUserId}`, "PUT");
+    } catch (error) {
+      process.stderr.write(
+        `[opencode-notifier-plugin] 스레드 참여자 초대에 실패했습니다 (thread=${threadChannelId}, user=${mentionUserId}): ${error instanceof Error ? error.message : String(error)}\n`
+      );
     }
   }
 
@@ -1551,6 +1851,7 @@ export default async function OpenCodeNotifierPlugin(input) {
       const resolvePromise = (async () => {
         try {
           const threadChannelId = await createSessionThread(target.id, state);
+          await inviteMentionUserToThread(target.id, threadChannelId);
           sessionThreadChannelCache.set(cacheKey, threadChannelId);
           threadTitleByChannelId.set(threadChannelId, buildSessionThreadName(state));
           await rememberThreadRoute(target.id, state, threadChannelId);
@@ -1898,6 +2199,12 @@ export default async function OpenCodeNotifierPlugin(input) {
 
   return {
     event: async ({ event }) => {
+      cleanupStaleSessionThreadsIfNeeded().catch((error) => {
+        process.stderr.write(
+          `[opencode-notifier-plugin] 비활성 스레드 자동 정리 점검에 실패했습니다: ${error instanceof Error ? error.message : String(error)}\n`
+        );
+      });
+
       const sessionID = getSessionID(event);
       if (!sessionID) {
         return;

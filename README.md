@@ -263,6 +263,8 @@ npm run plugin:uninstall
   - OpenCode 로그 형식이 명확할 때 마지막 assistant 블록 추출 정확도를 높임
 - `discord.targets`
   - 여러 타겟 동시 전송 가능
+- `discord.mentionUserId`
+  - 알림 본문에서 멘션할 유저 ID(선택). 플러그인 세션 스레드 모드에서는 새 스레드 생성 직후 같은 유저를 스레드 멤버로 초대 시도
 - `environment.labelsByKey`
   - 실행 환경 키별 레이블 매핑. setup에서 입력한 레이블이 여기에 저장되고, 디스코드 제목에 반영됨
 - `profiles`
@@ -284,6 +286,14 @@ npm run plugin:uninstall
   - `true`면 채널 타겟에서 세션별 스레드를 만들어 같은 세션 업데이트를 같은 스레드로 누적 (기본값 `true`)
 - `discord.sessionThreadAutoArchiveMinutes`
   - 생성 스레드의 자동 보관 시간(분). `60 | 1440 | 4320 | 10080` 중 하나, 기본값 `1440`
+- `discord.staleThreadCleanupEnabled`
+  - `true`면 세션 스레드 자동 정리를 활성화. 비활성 기준을 넘긴 오래된 스레드를 주기적으로 삭제
+- `discord.staleThreadCleanupIntervalMs`
+  - 자동 정리 점검 주기(ms). 이벤트가 들어온 시점에만 점검하며, 기본값 `21600000`(6시간)
+- `discord.staleThreadInactivityMs`
+  - 최근 활동이 없다고 판단할 기준 시간(ms). 기본값 `2592000000`(30일)
+- `discord.staleThreadCleanupMaxDeletePerRun`
+  - 한 번의 점검에서 삭제할 최대 스레드 수. 기본값 `20`
 - 스레드 라우팅 저장소 (고정 동작)
   - `~/.config/opencode/opencode-notifier-session-threads.json`에 채널+세션(및 프롬프트 기반 생성 제목) 기준 매핑을 저장해 재시작 후에도 기존 스레드를 우선 재사용
 - 상태 메시지 업데이트 (고정 동작)
@@ -301,6 +311,7 @@ npm run plugin:uninstall
 - `Send Messages`
 - `Send Messages in Threads`
 - `Create Public Threads`
+- `Manage Threads` (권장: 스레드 멤버 초대/자동 정리 기능 안정화)
 
 ### 권한 URL (예시)
 
@@ -312,11 +323,13 @@ https://discord.com/api/oauth2/authorize?client_id=YOUR_CLIENT_ID&scope=bot&perm
 
 `3072`는 기본 조합(`View Channels(1024)` + `Send Messages(2048)`) 예시입니다.
 세션 스레드 모드를 쓰면 여기에 `Send Messages in Threads`, `Create Public Threads` 권한을 추가로 부여하세요.
+세션 스레드 자동 정리까지 사용할 경우 `Manage Threads`도 함께 부여하세요.
 
 ### 전송 조건
 
 - 채널 전송: 봇이 해당 서버/채널에 초대되어 있고 메시지 권한이 있어야 합니다.
 - 세션 스레드 사용 시: 위 권한에 더해 스레드 생성/전송 권한이 있어야 하며, 없으면 기본 채널 전송으로 자동 폴백됩니다.
+- 세션 스레드 자동 정리 사용 시: `Manage Threads` 권한이 필요하며, 권한이 없으면 자동 삭제가 실패할 수 있습니다.
 - DM 전송: 봇이 대상 유저와 DM을 열 수 있어야 합니다.
 - 채널 ID만 넣고 DM을 비워 둬도 정상 동작합니다.
 - 스레드 모드에서는 반복 헤더와 요청 식별자 노출 없이 본문 중심으로 전송됩니다.
