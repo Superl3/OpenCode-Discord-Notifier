@@ -286,8 +286,12 @@ npm run plugin:uninstall
   - idle 감지 후 지정 시간만큼 지연한 뒤 최종 상태를 다시 확인하고 알림 전송 (기본값 `1200`)
 - `trigger.minimumResponseMs`
   - 요청 시작 후 최소 경과 시간이 되기 전에는 idle 알림을 보내지 않음 (기본값 `0`)
+- `trigger.notifyOnPermissionInterrupt`
+  - `permission.asked`/`permission.requested` 이벤트 알림 여부 (기본값 `true`)
+- `trigger.suppressPermissionInterruptWhenAutoBypass`
+  - IDE 자동 권한 수락(bypass)으로 판단되면 permission 알림을 생략 (기본값 `true`)
 - `INTERRUPT NOTICE` (고정 동작)
-  - `permission.asked`/입력 요구 이벤트가 오면 서브에이전트 포함 모든 agent에 대해 별도 notice 포맷으로 즉시 알림
+  - 입력 요구 이벤트가 오면 서브에이전트 포함 모든 agent에 대해 별도 notice 포맷으로 즉시 알림
 - `discord.sessionThreadsEnabled`
   - `true`면 채널 타겟에서 세션별 스레드를 만들어 같은 세션 업데이트를 같은 스레드로 누적 (기본값 `true`)
 - `discord.sessionThreadAutoArchiveMinutes`
@@ -375,6 +379,9 @@ https://discord.com/api/oauth2/authorize?client_id=YOUR_CLIENT_ID&scope=bot&perm
   - 최신 플러그인은 완료/요약 알림에서는 해당 패턴, `@... subagent` 세션, 그리고 `task/delegate_task` 도중 생성된 중간 메시지를 자동으로 제외합니다.
   - 대신 사용자 응답이 필요한 interrupt 대기 상태(선택/토큰/권한)는 `INTERRUPT NOTICE`로 서브에이전트 포함 즉시 알립니다.
   - 반영이 안 되면 `git pull` 후 `npm run plugin:install`을 다시 실행하고 IDE를 재시작하세요.
+- IDE에서 권한 자동 수락(bypass)을 켰는데 permission 알림이 계속 오면:
+  - `trigger.suppressPermissionInterruptWhenAutoBypass`가 `true`인지 확인하세요.
+  - 완전히 끄려면 `trigger.notifyOnPermissionInterrupt`를 `false`로 설정하세요.
 - 실행할 때 `현재 실행 환경 레이블이 등록되지 않았습니다`가 보이면:
   - 해당 환경 키가 아직 `environment.labelsByKey`에 없습니다.
   - `npm run setup`을 실행해 현재 환경 레이블을 등록해 주세요.

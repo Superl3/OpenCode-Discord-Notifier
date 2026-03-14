@@ -123,6 +123,8 @@ function buildDefaultConfig() {
     trigger: {
       notifyOnSessionIdle: true,
       notifyOnStatusIdle: false,
+      notifyOnPermissionInterrupt: true,
+      suppressPermissionInterruptWhenAutoBypass: true,
       cooldownMs: 60000,
       dedupeWindowMs: 15000,
       requireAssistantMessage: true,
@@ -539,7 +541,12 @@ function isIntermediateAnalysisMessage(value) {
     /^\s*plan\*{0,2}\b/im,
     /@[a-z0-9_-]+\s+subagent/i,
     /launch multiple background agents/i,
-    /do not edit files; rely on repository read\/search only/i
+    /do not edit files; rely on repository read\/search only/i,
+    /<dcp-system-reminder>/i,
+    /max context limit reached/i,
+    /the only tool you have for context management is [`']?compress[`']?/i,
+    /harness-aware pruning tiers/i,
+    /verification checklist after each compression/i
   ];
 
   if (hardMarkers.some((marker) => marker.test(text))) {
@@ -562,6 +569,33 @@ function isIntermediateAnalysisMessage(value) {
   }
 
   return markerHits >= 2;
+}
+
+function isDcpCompressionMessage(value) {
+  const text = normalizeText(value);
+  if (!text) {
+    return false;
+  }
+
+  const markers = [
+    /\bdcp\s*\|/i,
+    /tokens\s+saved\s+total/i,
+    /compression\s*#\d+/i,
+    /tokens\s+removed/i,
+    /context\s+compression/i,
+    /<compress\s+triggered\s+manually>/i
+  ];
+
+  return markers.some((marker) => marker.test(text));
+}
+
+function shouldSuppressControlMessage(value) {
+  const text = normalizeText(value);
+  if (!text) {
+    return false;
+  }
+
+  return isIntermediateAnalysisMessage(text) || isDcpCompressionMessage(text);
 }
 
 function pickNormalizedString(candidates, maxChars = 120) {
@@ -590,7 +624,56 @@ function isLikelyUserInterruptPrompt(value) {
   return positivePattern.test(text) && !negativePattern.test(text);
 }
 
-function extractInterruptNotice(event) {
+function hasAutoBypassHint(event) {
+  const props = event?.properties ?? {};
+
+  const booleanHints = [
+    props.autoBypass,
+    props.autoBypassed,
+    props.autoApproved,
+    props.autoAccepted,
+    props.permission?.autoBypass,
+    props.permission?.autoBypassed,
+    props.permission?.autoApproved,
+    props.permission?.autoAccepted,
+    props.permission?.granted,
+    props.permission?.allowed,
+    props.request?.autoBypass,
+    props.request?.autoBypassed,
+    props.request?.autoApproved,
+    props.request?.autoAccepted,
+    props.request?.granted,
+    props.request?.allowed
+  ];
+
+  if (booleanHints.some((value) => value === true)) {
+    return true;
+  }
+
+  const textHint = pickNormalizedString(
+    [
+      props.permission?.decision,
+      props.permission?.state,
+      props.permission?.reason,
+      props.request?.decision,
+      props.request?.state,
+      props.request?.reason,
+      props.reason,
+      props.status?.reason
+    ],
+    200
+  ).toLowerCase();
+
+  if (!textHint) {
+    return false;
+  }
+
+  const positive = /(auto|bypass|pre-?approved|always\s*allow|granted|approved)/.test(textHint);
+  const negative = /(manual|prompt|asked|required|denied|rejected)/.test(textHint);
+  return positive && !negative;
+}
+
+function extractInterruptNotice(event, config) {
   const props = event?.properties ?? {};
   const eventType = normalizeSingleLine(event?.type, 120);
   const eventTypeLower = eventType.toLowerCase();
@@ -600,6 +683,14 @@ function extractInterruptNotice(event) {
   }
 
   if (eventTypeLower === "permission.asked" || eventTypeLower === "permission.requested") {
+    if (config?.trigger?.notifyOnPermissionInterrupt === false) {
+      return null;
+    }
+
+    if (config?.trigger?.suppressPermissionInterruptWhenAutoBypass !== false && hasAutoBypassHint(event)) {
+      return null;
+    }
+
     const permissionName = pickNormalizedString(
       [
         props.permission,
@@ -849,6 +940,7 @@ function resolveTerminalRequestPhase(terminationNotice) {
 function resetCurrentRequestState(state) {
   state.currentRequestId = null;
   state.currentRequestPreview = "";
+  state.suppressCurrentRequestNotifications = false;
   state.currentRequestStartedAt = 0;
   state.subtaskByCallId.clear();
   state.userMessageIds.clear();
@@ -872,6 +964,8 @@ function normalizeRuntimeConfig(raw) {
     trigger: {
       notifyOnSessionIdle: merged.trigger?.notifyOnSessionIdle !== false,
       notifyOnStatusIdle: merged.trigger?.notifyOnStatusIdle === true,
+      notifyOnPermissionInterrupt: merged.trigger?.notifyOnPermissionInterrupt !== false,
+      suppressPermissionInterruptWhenAutoBypass: merged.trigger?.suppressPermissionInterruptWhenAutoBypass !== false,
       cooldownMs: Number.isFinite(merged.trigger?.cooldownMs) ? merged.trigger.cooldownMs : 60000,
       dedupeWindowMs: Number.isFinite(merged.trigger?.dedupeWindowMs)
         ? Math.min(Math.max(1000, merged.trigger.dedupeWindowMs), 300000)
@@ -1362,6 +1456,7 @@ function createSessionState(sessionID, workspaceName) {
     lastAssistantText: "",
     currentRequestId: null,
     currentRequestPreview: "",
+    suppressCurrentRequestNotifications: false,
     currentRequestStartedAt: 0,
     lastProgressSnapshotKey: "",
     progressUpdateChain: Promise.resolve(),
@@ -2022,6 +2117,10 @@ export default async function OpenCodeNotifierPlugin(input) {
       return;
     }
 
+    if (state.suppressCurrentRequestNotifications) {
+      return;
+    }
+
     const requestId = state.currentRequestId;
     const queuedOperation = async () => {
       if (!state.currentRequestId || state.currentRequestId !== requestId) {
@@ -2101,6 +2200,17 @@ export default async function OpenCodeNotifierPlugin(input) {
 
     const terminationNotice = state.pendingTerminationNotice;
     const interruptNotice = state.pendingInterruptNotice;
+
+    if (state.suppressCurrentRequestNotifications && !interruptNotice) {
+      if (state.currentRequestId) {
+        try {
+          await finalizeCurrentRequestStatus(state, terminationNotice, null);
+        } catch (error) {
+          process.stderr.write(`[opencode-notifier-plugin] ${error instanceof Error ? error.message : String(error)}\n`);
+        }
+      }
+      return;
+    }
 
     if (isSubagentSessionState(state) && !interruptNotice) {
       return;
@@ -2294,7 +2404,7 @@ export default async function OpenCodeNotifierPlugin(input) {
         state.sessionTitle = sessionTitle;
       }
 
-      const interruptNotice = extractInterruptNotice(event);
+      const interruptNotice = extractInterruptNotice(event, config);
       if (interruptNotice) {
         clearIdleNotifyTimer(state);
         state.pendingInterruptNotice = interruptNotice;
@@ -2346,6 +2456,7 @@ export default async function OpenCodeNotifierPlugin(input) {
             state.currentRequestId = info.id;
             state.currentRequestStartedAt = now;
             state.currentRequestPreview = "";
+            state.suppressCurrentRequestNotifications = false;
             state.subtaskByCallId.clear();
             state.lastProgressSnapshotKey = "";
             state.idleArmed = false;
@@ -2359,6 +2470,12 @@ export default async function OpenCodeNotifierPlugin(input) {
             : extractUserPromptCandidateFromInfo(info, props);
 
           if (promptCandidate) {
+            state.suppressCurrentRequestNotifications = shouldSuppressControlMessage(promptCandidate);
+            if (state.suppressCurrentRequestNotifications) {
+              state.currentRequestPreview = "";
+              return;
+            }
+
             state.currentRequestPreview = promptCandidate;
             const titleUpdated = updateGeneratedThreadTitleFromPrompt(state, promptCandidate);
 
@@ -2483,6 +2600,12 @@ export default async function OpenCodeNotifierPlugin(input) {
         state.textByMessageId.set(part.messageID, nextText);
 
         if (state.currentRequestId === part.messageID && state.userMessageIds.has(part.messageID)) {
+          state.suppressCurrentRequestNotifications = shouldSuppressControlMessage(nextText);
+          if (state.suppressCurrentRequestNotifications) {
+            state.currentRequestPreview = "";
+            return;
+          }
+
           state.currentRequestPreview = nextText;
           const titleUpdated = updateGeneratedThreadTitleFromPrompt(state, nextText);
 

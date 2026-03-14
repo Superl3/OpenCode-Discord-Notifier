@@ -3,6 +3,8 @@
   "trigger": {
     "notifyOnSessionIdle": true,
     "notifyOnStatusIdle": false,
+    "notifyOnPermissionInterrupt": true,
+    "suppressPermissionInterruptWhenAutoBypass": true,
     "cooldownMs": 60000,
     "dedupeWindowMs": 15000,
     "requireAssistantMessage": true,
