@@ -10,6 +10,8 @@ const runSetup = args.has("--run-setup");
 const skipNpmInstall = args.has("--skip-npm-install");
 const skipOpencodeCheck = args.has("--skip-opencode-check");
 
+const REGISTRY_PLUGIN_NAME = "@superl3/discord-notifier";
+const LEGACY_PLUGIN_NAME = "opencode-notifier-plugin";
 const PLUGIN_ENTRY_FILE = "opencode-notifier-plugin.js";
 
 function logStep(message) {
@@ -92,6 +94,14 @@ function readJsonIfExists(filePath) {
 }
 
 function isNotifierPluginEntry(entry) {
+  if (typeof entry === "string" && (entry === REGISTRY_PLUGIN_NAME || entry.startsWith(`${REGISTRY_PLUGIN_NAME}@`))) {
+    return true;
+  }
+
+  if (typeof entry === "string" && (entry === LEGACY_PLUGIN_NAME || entry.startsWith(`${LEGACY_PLUGIN_NAME}@`))) {
+    return true;
+  }
+
   if (typeof entry !== "string" || !entry.startsWith("file://")) {
     return false;
   }
@@ -107,7 +117,10 @@ function isNotifierPluginEntry(entry) {
 
 function verifyPluginInstall() {
   for (const dir of candidateConfigDirs()) {
-    const configPath = join(dir, "opencode.json");
+    const configPathJsonc = join(dir, "opencode.jsonc");
+    const configPathJson = join(dir, "opencode.json");
+    const configPath = existsSync(configPathJsonc) ? configPathJsonc : configPathJson;
+
     if (!existsSync(configPath)) {
       continue;
     }

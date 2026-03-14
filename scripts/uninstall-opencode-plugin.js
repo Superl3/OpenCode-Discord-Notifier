@@ -3,14 +3,19 @@
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { join } from "node:path";
 
-const PLUGIN_NAME = "opencode-notifier-plugin";
+const PLUGIN_NAME = "@superl3/discord-notifier";
+const LEGACY_PLUGIN_NAME = "opencode-notifier-plugin";
 const PLUGIN_ENTRY_FILE = "opencode-notifier-plugin.js";
 
 function isLegacyPluginEntry(entry) {
-  return typeof entry === "string" && (entry === PLUGIN_NAME || entry.startsWith(`${PLUGIN_NAME}@`));
+  return typeof entry === "string" && (
+    entry === PLUGIN_NAME
+    || entry.startsWith(`${PLUGIN_NAME}@`)
+    || entry === LEGACY_PLUGIN_NAME
+    || entry.startsWith(`${LEGACY_PLUGIN_NAME}@`)
+  );
 }
 
 function isNotifierFilePluginEntry(entry) {
@@ -69,8 +74,6 @@ async function readJsonOrDefault(filePath, fallback) {
 }
 
 async function main() {
-  const repoRoot = resolve(process.cwd());
-  const pluginSpecifier = pathToFileURL(resolve(repoRoot, "opencode-plugin", PLUGIN_ENTRY_FILE)).href;
   const candidates = candidateConfigDirs();
   const configDir =
     candidates.find((dir) => existsSync(join(dir, "opencode.json")) || existsSync(join(dir, "package.json")))
@@ -81,12 +84,13 @@ async function main() {
     return;
   }
 
-  const configPath = join(configDir, "opencode.json");
+  const configFileName = existsSync(join(configDir, "opencode.jsonc")) ? "opencode.jsonc" : "opencode.json";
+  const configPath = join(configDir, configFileName);
   const pkgPath = join(configDir, "package.json");
 
   const config = await readJsonOrDefault(configPath, {});
   if (Array.isArray(config.plugin)) {
-    config.plugin = config.plugin.filter((entry) => !isNotifierPluginEntry(entry, pluginSpecifier));
+    config.plugin = config.plugin.filter((entry) => !isNotifierPluginEntry(entry, PLUGIN_NAME));
   }
   await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
 
@@ -94,11 +98,13 @@ async function main() {
     const pkg = await readJsonOrDefault(pkgPath, {});
     if (pkg.dependencies && typeof pkg.dependencies === "object") {
       delete pkg.dependencies[PLUGIN_NAME];
+      delete pkg.dependencies[LEGACY_PLUGIN_NAME];
     }
     await writeFile(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`, "utf8");
   }
 
   await rm(join(configDir, "node_modules", PLUGIN_NAME), { recursive: true, force: true });
+  await rm(join(configDir, "node_modules", LEGACY_PLUGIN_NAME), { recursive: true, force: true });
 
   process.stdout.write("OpenCode notifier plugin 제거 완료\n");
 }

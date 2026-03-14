@@ -216,8 +216,8 @@ npm run plugin:install
 
 설치 스크립트는 아래를 자동으로 처리합니다.
 
-- OpenCode 설정 파일(`opencode.json`)의 `plugin` 배열에 `file://.../opencode-plugin/opencode-notifier-plugin.js` 등록
-- 기존 `opencode-notifier-plugin` 문자열 엔트리가 있으면 제거 후 최신 file URI 엔트리로 교체
+- OpenCode 설정 파일(`opencode.json`)의 `plugin` 배열에 `@superl3/discord-notifier` 등록
+- 기존 `opencode-notifier-plugin`/로컬 file URI 엔트리가 있으면 제거 후 registry 엔트리로 교체
 
 적용 후 OpenCode IDE를 재시작하세요.
 
@@ -280,6 +280,12 @@ npm run plugin:uninstall
   - 같은 메시지가 연속 idle 이벤트에서 중복 발송되는 것을 막는 보호 시간(ms)
 - `trigger.requireAssistantMessage`
   - assistant 메시지가 없는 idle 이벤트는 무시
+- `trigger.requireActivityBeforeIdle`
+  - 직전 요청에서 실제 assistant 활동이 있었을 때만 idle 알림 허용 (기본값 `true`)
+- `trigger.idleDebounceMs`
+  - idle 감지 후 지정 시간만큼 지연한 뒤 최종 상태를 다시 확인하고 알림 전송 (기본값 `1200`)
+- `trigger.minimumResponseMs`
+  - 요청 시작 후 최소 경과 시간이 되기 전에는 idle 알림을 보내지 않음 (기본값 `0`)
 - `INTERRUPT NOTICE` (고정 동작)
   - `permission.asked`/입력 요구 이벤트가 오면 서브에이전트 포함 모든 agent에 대해 별도 notice 포맷으로 즉시 알림
 - `discord.sessionThreadsEnabled`
@@ -379,6 +385,9 @@ https://discord.com/api/oauth2/authorize?client_id=YOUR_CLIENT_ID&scope=bot&perm
   - 최신 코드 기준 기본값은 `session.idle`만 사용하므로, 먼저 `npm run setup`으로 설정을 다시 저장하세요.
   - 플러그인 설정에서 `trigger.notifyOnStatusIdle`가 `true`이면 `false`로 바꾸고 IDE를 재시작하세요.
   - 그래도 중복이면 `trigger.dedupeWindowMs`를 `15000` 이상으로 올려서 동일 메시지 중복을 차단하세요.
+- "완료 전에 너무 이르게 알림이 온다"면:
+  - `trigger.requireActivityBeforeIdle`가 `true`인지 확인하고, `trigger.idleDebounceMs`를 `1500~3000`으로 올려 보세요.
+  - 짧은 응답/상태 튐 구간을 더 걸러야 하면 `trigger.minimumResponseMs`를 `1000~5000`으로 설정해 안정화하세요.
 - 메타데이터 줄(시간/트리거/세션)이 불필요하면:
   - `message.includeMetadata`를 `false`로 설정하세요. (`npm run setup` 기본값도 `false`)
 - `Discord API ... failed (403): Missing Access`가 나오면:

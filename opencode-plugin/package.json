@@ -1,7 +1,8 @@
 {
-  "name": "opencode-notifier-plugin",
+  "name": "@superl3/discord-notifier",
   "version": "0.1.0",
-  "private": true,
+  "private": false,
+  "author": "Superl3",
   "type": "module",
   "main": "opencode-notifier-plugin.js"
 }

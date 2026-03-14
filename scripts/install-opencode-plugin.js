@@ -4,9 +4,8 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
 
-const PLUGIN_NAME = "opencode-notifier-plugin";
+const PLUGIN_NAME = "@superl3/discord-notifier";
 const PLUGIN_ENTRY_FILE = "opencode-notifier-plugin.js";
 
 function candidateConfigDirs() {
@@ -46,7 +45,7 @@ async function readJsonOrDefault(filePath, fallback) {
 async function ensureConfigDir() {
   const candidates = candidateConfigDirs();
   const existing =
-    candidates.find((dir) => existsSync(join(dir, "opencode.json")) || existsSync(join(dir, "package.json")))
+    candidates.find((dir) => existsSync(join(dir, "opencode.jsonc")) || existsSync(join(dir, "opencode.json")) || existsSync(join(dir, "package.json")))
     || candidates.find((dir) => existsSync(dir));
 
   const target = existing || candidates[0];
@@ -56,6 +55,10 @@ async function ensureConfigDir() {
 
 function isLegacyPluginEntry(entry) {
   return typeof entry === "string" && (entry === PLUGIN_NAME || entry.startsWith(`${PLUGIN_NAME}@`));
+}
+
+function isOldRegistryPluginEntry(entry) {
+  return typeof entry === "string" && (entry === "opencode-notifier-plugin" || entry.startsWith("opencode-notifier-plugin@"));
 }
 
 function isNotifierFilePluginEntry(entry) {
@@ -76,10 +79,11 @@ function isNotifierFilePluginEntry(entry) {
 }
 
 async function updateOpenCodeConfig(configDir, pluginSpecifier) {
-  const configPath = join(configDir, "opencode.json");
+  const configFileName = existsSync(join(configDir, "opencode.jsonc")) ? "opencode.jsonc" : "opencode.json";
+  const configPath = join(configDir, configFileName);
   const config = await readJsonOrDefault(configPath, {});
   const plugins = Array.isArray(config.plugin)
-    ? config.plugin.filter((entry) => !isLegacyPluginEntry(entry) && !isNotifierFilePluginEntry(entry))
+    ? config.plugin.filter((entry) => !isLegacyPluginEntry(entry) && !isOldRegistryPluginEntry(entry) && !isNotifierFilePluginEntry(entry))
     : [];
 
   plugins.push(pluginSpecifier);
@@ -89,18 +93,20 @@ async function updateOpenCodeConfig(configDir, pluginSpecifier) {
   return configPath;
 }
 
-function buildPluginSpecifier(repoRoot) {
-  const pluginEntryPath = resolve(repoRoot, "opencode-plugin", PLUGIN_ENTRY_FILE);
-  if (!existsSync(pluginEntryPath)) {
-    throw new Error(`플러그인 진입 파일을 찾지 못했습니다: ${pluginEntryPath}`);
+async function buildPluginSpecifier(repoRoot) {
+  const packageJsonPath = resolve(repoRoot, "opencode-plugin", "package.json");
+  if (!existsSync(packageJsonPath)) {
+    throw new Error(`플러그인 package.json을 찾지 못했습니다: ${packageJsonPath}`);
   }
 
-  return pathToFileURL(pluginEntryPath).href;
+  const packageJson = await readJsonOrDefault(packageJsonPath, {});
+  const version = typeof packageJson.version === "string" ? packageJson.version.trim() : "";
+  return version ? `${PLUGIN_NAME}@${version}` : PLUGIN_NAME;
 }
 
 async function main() {
   const repoRoot = resolve(process.cwd());
-  const pluginSpecifier = buildPluginSpecifier(repoRoot);
+  const pluginSpecifier = await buildPluginSpecifier(repoRoot);
   const configDir = await ensureConfigDir();
 
   const configPath = await updateOpenCodeConfig(configDir, pluginSpecifier);
