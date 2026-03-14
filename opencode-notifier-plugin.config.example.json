@@ -5,7 +5,10 @@
     "notifyOnStatusIdle": false,
     "cooldownMs": 60000,
     "dedupeWindowMs": 15000,
-    "requireAssistantMessage": true
+    "requireAssistantMessage": true,
+    "requireActivityBeforeIdle": true,
+    "idleDebounceMs": 1200,
+    "minimumResponseMs": 0
   },
   "message": {
     "mode": "summary",

@@ -17,6 +17,10 @@ const THREAD_STALE_INACTIVITY_MIN_MS = 1000 * 60 * 60 * 24;
 const THREAD_STALE_INACTIVITY_MAX_MS = 1000 * 60 * 60 * 24 * 180;
 const THREAD_STALE_INACTIVITY_DEFAULT_MS = 1000 * 60 * 60 * 24 * 30;
 const THREAD_CLEANUP_MAX_DELETE_PER_RUN_DEFAULT = 20;
+const IDLE_DEBOUNCE_DEFAULT_MS = 1200;
+const IDLE_DEBOUNCE_MAX_MS = 15000;
+const MIN_RESPONSE_DEFAULT_MS = 0;
+const MIN_RESPONSE_MAX_MS = 1000 * 60 * 10;
 
 function stripAnsi(value) {
   return String(value ?? "").replace(/\u001b\[[0-9;]*m/g, "");
@@ -121,7 +125,10 @@ function buildDefaultConfig() {
       notifyOnStatusIdle: false,
       cooldownMs: 60000,
       dedupeWindowMs: 15000,
-      requireAssistantMessage: true
+      requireAssistantMessage: true,
+      requireActivityBeforeIdle: true,
+      idleDebounceMs: IDLE_DEBOUNCE_DEFAULT_MS,
+      minimumResponseMs: MIN_RESPONSE_DEFAULT_MS
     },
     message: {
       mode: "summary",
@@ -264,6 +271,22 @@ function normalizeThreadCleanupMaxDeletePerRun(value) {
   }
 
   return Math.min(Math.max(Math.round(value), 1), 200);
+}
+
+function normalizeIdleDebounceMs(value) {
+  if (!Number.isFinite(value)) {
+    return IDLE_DEBOUNCE_DEFAULT_MS;
+  }
+
+  return Math.min(Math.max(Math.round(value), 0), IDLE_DEBOUNCE_MAX_MS);
+}
+
+function normalizeMinimumResponseMs(value) {
+  if (!Number.isFinite(value)) {
+    return MIN_RESPONSE_DEFAULT_MS;
+  }
+
+  return Math.min(Math.max(Math.round(value), 0), MIN_RESPONSE_MAX_MS);
 }
 
 function normalizeSingleLine(value, maxChars = 120) {
@@ -830,6 +853,7 @@ function resetCurrentRequestState(state) {
   state.subtaskByCallId.clear();
   state.userMessageIds.clear();
   state.lastProgressSnapshotKey = "";
+  state.idleArmed = false;
 }
 
 function buildTextDedupeKey(value) {
@@ -852,7 +876,10 @@ function normalizeRuntimeConfig(raw) {
       dedupeWindowMs: Number.isFinite(merged.trigger?.dedupeWindowMs)
         ? Math.min(Math.max(1000, merged.trigger.dedupeWindowMs), 300000)
         : 15000,
-      requireAssistantMessage: merged.trigger?.requireAssistantMessage !== false
+      requireAssistantMessage: merged.trigger?.requireAssistantMessage !== false,
+      requireActivityBeforeIdle: merged.trigger?.requireActivityBeforeIdle !== false,
+      idleDebounceMs: normalizeIdleDebounceMs(merged.trigger?.idleDebounceMs),
+      minimumResponseMs: normalizeMinimumResponseMs(merged.trigger?.minimumResponseMs)
     },
     message: {
       mode: messageMode,
@@ -1345,8 +1372,17 @@ function createSessionState(sessionID, workspaceName) {
     lastAssistantUpdatedAt: 0,
     waitingForInputReady: false,
     pendingTerminationNotice: null,
-    pendingInterruptNotice: null
+    pendingInterruptNotice: null,
+    idleNotifyTimer: null,
+    idleArmed: false
   };
+}
+
+function clearIdleNotifyTimer(state) {
+  if (state?.idleNotifyTimer) {
+    clearTimeout(state.idleNotifyTimer);
+    state.idleNotifyTimer = null;
+  }
 }
 
 function getSessionID(event) {
@@ -2197,6 +2233,46 @@ export default async function OpenCodeNotifierPlugin(input) {
     state.pendingInterruptNotice = null;
   }
 
+  async function scheduleIdleNotification(state, triggerKind) {
+    clearIdleNotifyTimer(state);
+
+    const runNotification = async () => {
+      state.idleNotifyTimer = null;
+
+      if (config.trigger.requireActivityBeforeIdle && !state.idleArmed) {
+        return;
+      }
+
+      const startedAt = state.currentRequestStartedAt || state.responseStartedAt || state.lastAssistantUpdatedAt;
+      if (
+        config.trigger.minimumResponseMs > 0
+        && Number.isFinite(startedAt)
+        && startedAt > 0
+        && Date.now() - startedAt < config.trigger.minimumResponseMs
+      ) {
+        state.idleArmed = false;
+        return;
+      }
+
+      try {
+        await notifyIfReady(state, triggerKind);
+      } catch (error) {
+        process.stderr.write(`[opencode-notifier-plugin] ${error instanceof Error ? error.message : String(error)}\n`);
+      } finally {
+        state.idleArmed = false;
+      }
+    };
+
+    if (config.trigger.idleDebounceMs <= 0) {
+      await runNotification();
+      return;
+    }
+
+    state.idleNotifyTimer = setTimeout(() => {
+      void runNotification();
+    }, config.trigger.idleDebounceMs);
+  }
+
   return {
     event: async ({ event }) => {
       cleanupStaleSessionThreadsIfNeeded().catch((error) => {
@@ -2220,6 +2296,7 @@ export default async function OpenCodeNotifierPlugin(input) {
 
       const interruptNotice = extractInterruptNotice(event);
       if (interruptNotice) {
+        clearIdleNotifyTimer(state);
         state.pendingInterruptNotice = interruptNotice;
         state.waitingForInputReady = true;
 
@@ -2248,9 +2325,11 @@ export default async function OpenCodeNotifierPlugin(input) {
       }
 
       if (isSubagentSessionState(state)) {
+        clearIdleNotifyTimer(state);
         state.waitingForInputReady = false;
         state.pendingTerminationNotice = null;
         state.pendingInterruptNotice = null;
+        state.idleArmed = false;
         return;
       }
 
@@ -2258,6 +2337,7 @@ export default async function OpenCodeNotifierPlugin(input) {
         const info = props.info;
 
         if (info?.role === "user" && typeof info.id === "string") {
+          clearIdleNotifyTimer(state);
           const now = Date.now();
           const isSameRequest = state.currentRequestId === info.id && state.currentRequestStartedAt > 0;
           state.userMessageIds.add(info.id);
@@ -2268,6 +2348,7 @@ export default async function OpenCodeNotifierPlugin(input) {
             state.currentRequestPreview = "";
             state.subtaskByCallId.clear();
             state.lastProgressSnapshotKey = "";
+            state.idleArmed = false;
           } else if (!Number.isFinite(state.currentRequestStartedAt) || state.currentRequestStartedAt <= 0) {
             state.currentRequestStartedAt = now;
           }
@@ -2304,6 +2385,7 @@ export default async function OpenCodeNotifierPlugin(input) {
         }
 
         if (info?.role === "assistant" && typeof info.id === "string") {
+          clearIdleNotifyTimer(state);
           const now = Date.now();
 
           if (typeof info.agent === "string" && /-junior\b/i.test(info.agent)) {
@@ -2334,6 +2416,7 @@ export default async function OpenCodeNotifierPlugin(input) {
               info.id !== state.lastNotifiedMessageId
               && !state.delegationMessageIds.has(info.id)
             );
+            state.idleArmed = true;
           }
         }
         return;
@@ -2421,6 +2504,7 @@ export default async function OpenCodeNotifierPlugin(input) {
         }
 
         if (state.assistantMessageIds.has(part.messageID) || state.lastAssistantMessageId === part.messageID) {
+          clearIdleNotifyTimer(state);
           if (!state.responseStartedAt) {
             state.responseStartedAt = now;
           }
@@ -2445,6 +2529,7 @@ export default async function OpenCodeNotifierPlugin(input) {
           );
           state.pendingTerminationNotice = null;
           state.pendingInterruptNotice = null;
+          state.idleArmed = true;
         }
         return;
       }
@@ -2454,6 +2539,7 @@ export default async function OpenCodeNotifierPlugin(input) {
 
         const terminationNotice = extractTerminationNotice(event);
         if (terminationNotice) {
+          clearIdleNotifyTimer(state);
           state.pendingTerminationNotice = terminationNotice;
           state.pendingInterruptNotice = null;
           state.waitingForInputReady = true;
@@ -2467,25 +2553,24 @@ export default async function OpenCodeNotifierPlugin(input) {
         }
 
         if (statusType === "busy" || statusType === "retry") {
+          clearIdleNotifyTimer(state);
           state.responseStartedAt = Date.now();
           state.waitingForInputReady = state.lastAssistantMessageId !== state.lastNotifiedMessageId;
           state.pendingTerminationNotice = null;
           state.pendingInterruptNotice = null;
+          state.idleArmed = true;
           return;
         }
 
         if (statusType === "idle" && config.trigger.notifyOnStatusIdle) {
-          try {
-            await notifyIfReady(state, "session.status: idle");
-          } catch (error) {
-            process.stderr.write(`[opencode-notifier-plugin] ${error instanceof Error ? error.message : String(error)}\n`);
-          }
+          await scheduleIdleNotification(state, "session.status: idle");
         }
         return;
       }
 
       const terminationNotice = extractTerminationNotice(event);
       if (terminationNotice) {
+        clearIdleNotifyTimer(state);
         state.pendingTerminationNotice = terminationNotice;
         state.pendingInterruptNotice = null;
         state.waitingForInputReady = true;
@@ -2499,11 +2584,7 @@ export default async function OpenCodeNotifierPlugin(input) {
       }
 
       if (event.type === "session.idle" && config.trigger.notifyOnSessionIdle) {
-        try {
-          await notifyIfReady(state, "session.idle");
-        } catch (error) {
-          process.stderr.write(`[opencode-notifier-plugin] ${error instanceof Error ? error.message : String(error)}\n`);
-        }
+        await scheduleIdleNotification(state, "session.idle");
       }
     }
   };
